@@ -2337,6 +2337,20 @@ local FeatureLoadout; FeatureLoadout = {
                 end
             end
         },
+        ["PunchWait"] = {
+            ["DisplayDescription"] = "How long Auto Punch waits after a successful block before punching (seconds)",
+            ["DisplayTitle"] = "Punch Wait",
+            ["LayoutOrder"] = 14.1,
+            ["Savable"] = true,
+            ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 0.15,
+            ["Requirement"] = "AutoPunch",
+            ["ExtraData"] = {
+                ["MaxValue"] = 1,
+                ["MinValue"] = 0,
+                ["Step"] = 0.05
+            }
+        },
         ["AutoPunch"] = {
             ["DisplayDescription"] = "Uses the punch ability when you block successfully",
             ["DisplayTitle"] = "Guest1337 Auto Punch",
@@ -2386,7 +2400,12 @@ local FeatureLoadout; FeatureLoadout = {
                 if not LocalHumanoid then return warn("no humanoid found") end
                 LocalCharacter:GetAttributeChangedSignal("TimesHit"):Connect(function()
                     if GetValue("AutoPunch") and SpeedMultipliers:FindFirstChild("GuestBlocking") and LocalHumanoid:GetAttribute("Overheal") ~= nil and LocalHumanoid:GetAttribute("Overheal") >= 10 and (self:GetClosestKiller()) then
-                        task.wait(0.08)
+                        -- Patch 173: read the current Punch Wait slider directly each trigger.
+                        local PunchWaitValue = PlusFolderSettings and PlusFolderSettings:FindFirstChild("PunchWait", true)
+                        local PunchWait = math.clamp(tonumber(PunchWaitValue and PunchWaitValue.Value) or 0.15, 0, 1)
+                        if PunchWait > 0 then
+                            task.wait(PunchWait)
+                        end
                         LocalCharacter:SetAttribute("DisableShiftLockMovement",true)
                         if FireSignal and MainUI:FindFirstChild("AbilityContainer"):FindFirstChild("Punch") then
                             FireSignal(MainUI.AbilityContainer.Punch.MouseButton1Click)
@@ -2400,6 +2419,8 @@ local FeatureLoadout; FeatureLoadout = {
                         end
                         local CameraTarget 
                         local SelectedVelocity
+                        -- Patch 173: restore the original Auto Punch look-at behavior.
+                        -- Auto Punch faces the killer's current position without prediction.
                         local LookAtUntil = os.clock() + 0.4
                         CameraTarget = RunService.RenderStepped:Connect(function()
                             if os.clock() >= LookAtUntil then
@@ -2410,10 +2431,6 @@ local FeatureLoadout; FeatureLoadout = {
                             if not ClosestKiller or not ClosestKiller:FindFirstChild("HumanoidRootPart") then return end
                             local KillerRootPos = ClosestKiller:FindFirstChild("HumanoidRootPart").Position
                             local SelectedPosition = Vector3.new(KillerRootPos.X,LocalRoot.Position.Y,KillerRootPos.Z)
-                            -- Moved from Drag Block: keep the survivor facing the killer during Auto Punch.
-                            if (SelectedPosition - LocalRoot.Position).Magnitude > 0.05 then
-                                LocalRoot.CFrame = CFrame.lookAt(LocalRoot.Position, SelectedPosition)
-                            end
                             local TargetCFrame = CFrame.new(LocalRoot.Position, SelectedPosition)
                             LocalCharacter:SetPrimaryPartCFrame(TargetCFrame)
                             if not SelectedVelocity then
