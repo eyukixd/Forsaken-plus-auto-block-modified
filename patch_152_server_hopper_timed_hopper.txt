@@ -89,8 +89,18 @@ local DragBlockToken = 0
 local DragBlockLastStart = 0
 local FOLLOW_KILLER_COOLDOWN = 27
 
+-- Exact Helpless detection from ReplicatedStorage.Modules.Schematics.StatusEffects.Helpless.
+-- The game's Applied handler sets Character.AbilitiesDisabled = true.
+local function IsHelplessActive()
+    if not LocalCharacter or not LocalCharacter.Parent then
+        return false
+    end
+    return LocalCharacter:GetAttribute("AbilitiesDisabled") == true
+end
+
 local function DragBlockAttackingKiller(Killer)
     if DragBlockBusy or not GetValue("DragBlock", false) then return end
+    if IsHelplessActive() then return end
     if os.clock() - DragBlockLastStart < FOLLOW_KILLER_COOLDOWN then return end
     if not Killer or not Killer.Parent then return end
 
@@ -99,6 +109,7 @@ local function DragBlockAttackingKiller(Killer)
     local Root = LocalRoot
     local KillerRoot = Killer:FindFirstChild("HumanoidRootPart")
     if not Character or not Humanoid or not Root or not KillerRoot then return end
+    if IsHelplessActive() then return end
 
     local PathfindingService = game:GetService("PathfindingService")
     local ContextActionService = game:GetService("ContextActionService")
@@ -106,8 +117,8 @@ local function DragBlockAttackingKiller(Killer)
     local MovementActionName = "AutoBlockFollowMovementOverride"
     -- C00lkidd stops 2 studs away; every other killer keeps the 3-stud distance.
     local KillerNameLower = string.lower(Killer.Name or "")
-    local STOP_DISTANCE = KillerNameLower:find("c00lkidd", 1, true) and 2 or 3
-    local FOLLOW_DURATION = 0.2
+    local STOP_DISTANCE = tonumber(GetValue("DragBlockStopDistance")) or (KillerNameLower:find("c00lkidd", 1, true) and 2 or 3)
+    local FOLLOW_DURATION = tonumber(GetValue("DragBlockHoldDuration")) or 0.2
     local WALK_DISTANCE_ONCE = 3
 
     DragBlockBusy = true
@@ -161,6 +172,40 @@ local function DragBlockAttackingKiller(Killer)
     Humanoid.JumpHeight = 0
     Humanoid.AutoRotate = false
 
+    -- Smoothly rotate the survivor toward the attacking killer while Drag Block is active.
+    -- The turn only changes rotation; movement toward the killer is still handled by Humanoid:MoveTo().
+    local SmoothLookConnection
+    local SmoothLookStarted = os.clock()
+    local SMOOTH_LOOK_DURATION = 0.4
+    local function StopSmoothLook()
+        if SmoothLookConnection then
+            SmoothLookConnection:Disconnect()
+            SmoothLookConnection = nil
+        end
+    end
+
+    SmoothLookConnection = RunService.RenderStepped:Connect(function(DeltaTime)
+        if not DragBlockBusy
+            or Token ~= DragBlockToken
+            or not GetValue("DragBlock", false)
+            or os.clock() - SmoothLookStarted >= SMOOTH_LOOK_DURATION
+            or not Root
+            or not Root.Parent
+            or not KillerRoot
+            or not KillerRoot.Parent then
+            StopSmoothLook()
+            return
+        end
+
+        local LookPosition = Vector3.new(KillerRoot.Position.X, Root.Position.Y, KillerRoot.Position.Z)
+        local LookDirection = LookPosition - Root.Position
+        if LookDirection.Magnitude > 0.05 then
+            local TargetCFrame = CFrame.lookAt(Root.Position, LookPosition)
+            local SmoothAlpha = 1 - math.exp(-12 * math.max(DeltaTime, 0))
+            Root.CFrame = Root.CFrame:Lerp(TargetCFrame, SmoothAlpha)
+        end
+    end)
+
     task.spawn(function()
         -- Walk toward the killer, stopping at the killer-specific distance.
         local direction = KillerRoot.Position - Root.Position
@@ -179,19 +224,12 @@ local function DragBlockAttackingKiller(Killer)
                 and Killer.Parent
                 and KillerRoot.Parent
                 and os.clock() - startedMove < FOLLOW_DURATION do
-                -- Keep the survivor aimed directly at the attacking killer while moving.
-                if Root and Root.Parent and KillerRoot and KillerRoot.Parent then
-                    local lookPosition = Vector3.new(KillerRoot.Position.X, Root.Position.Y, KillerRoot.Position.Z)
-                    if (lookPosition - Root.Position).Magnitude > 0.05 then
-                        Root.CFrame = CFrame.lookAt(Root.Position, lookPosition)
-                    end
-                end
-
                 -- Re-enable survivor controls as soon as the survivor reaches the killer-specific stop distance.
                 local currentKillerDistance = (Root.Position - KillerRoot.Position).Magnitude
                 if currentKillerDistance <= STOP_DISTANCE then
                     -- Stop-after-3-studs: restore player inputs immediately.
                     DragBlockToken += 1
+                    StopSmoothLook()
                     if Humanoid and Humanoid.Parent then
                         Humanoid:MoveTo(Root.Position)
                         Humanoid.WalkSpeed = OriginalWalkSpeed
@@ -226,6 +264,7 @@ local function DragBlockAttackingKiller(Killer)
                 DragBlockToken += 1
             end
 
+            StopSmoothLook()
             if Humanoid and Humanoid.Parent then
                 Humanoid:MoveTo(Root.Position)
                 Humanoid.WalkSpeed = OriginalWalkSpeed
@@ -277,11 +316,11 @@ local function GetClearGeneratorPosition(GeneratorMain)
     local GeneratorSize = GeneratorMain.Size
     local CheckDistance = math.max(4.5, math.max(GeneratorSize.X, GeneratorSize.Z) * 0.5 + 3)
 
+    -- Only use the two sides and the front. Never use the back.
     local Positions = {
         GeneratorCFrame.Position + GeneratorCFrame.RightVector * CheckDistance,
         GeneratorCFrame.Position - GeneratorCFrame.RightVector * CheckDistance,
-        GeneratorCFrame.Position + GeneratorCFrame.LookVector * CheckDistance,
-        GeneratorCFrame.Position - GeneratorCFrame.LookVector * CheckDistance
+        GeneratorCFrame.Position + GeneratorCFrame.LookVector * CheckDistance
     }
 
     local RaycastParams = RaycastParams.new()
@@ -291,19 +330,42 @@ local function GetClearGeneratorPosition(GeneratorMain)
     for _, Position in Positions do
         local Clear = true
 
-        for _, Player in Players:GetPlayers() do
-            if Player ~= LocalPlayer and Player.Character then
-                local OtherRoot = Player.Character:FindFirstChild("HumanoidRootPart")
-                if OtherRoot and (OtherRoot.Position - Position).Magnitude < 4 then
-                    Clear = false
-                    break
+        -- Make sure the player's body would not overlap solid geometry.
+        local OccupyingParts = workspace:GetPartBoundsInBox(
+            CFrame.new(Position),
+            Vector3.new(3, 5, 3),
+            RaycastParams
+        )
+
+        for _, Part in ipairs(OccupyingParts) do
+            if Part.CanCollide then
+                Clear = false
+                break
+            end
+        end
+
+        if Clear then
+            for _, Player in Players:GetPlayers() do
+                if Player ~= LocalPlayer and Player.Character then
+                    local OtherRoot = Player.Character:FindFirstChild("HumanoidRootPart")
+                    if OtherRoot and (OtherRoot.Position - Position).Magnitude < 4 then
+                        Clear = false
+                        break
+                    end
                 end
             end
         end
 
         if Clear then
+            -- Make sure there is no wall directly between the generator and
+            -- the interaction position.
             local Direction = Position - GeneratorCFrame.Position
-            local WallCheck = workspace:Raycast(GeneratorCFrame.Position, Direction.Unit * 5, RaycastParams)
+            local WallCheck = workspace:Raycast(
+                GeneratorCFrame.Position,
+                Direction.Unit * Direction.Magnitude,
+                RaycastParams
+            )
+
             if WallCheck then
                 Clear = false
             end
@@ -414,227 +476,7 @@ local FeatureLoadout; FeatureLoadout = {
             ["DisplayTitle"] = "Automation",
             ["LayoutOrder"] = 1
         },
-        ["ServerHopper"] = {
-            ["DisplayDescription"] = "Automatically hops to another public server when a configured chat trigger is detected",
-            ["DisplayTitle"] = "Server Hopper",
-            ["LayoutOrder"] = 0,
-            ["Savable"] = true,
-            ["InstanceType"] = "BoolValue",
-            ["DefaultInstanceValue"] = false,
-            ["ScriptFunction"] = function(self, Value)
-                local TextChatService = game:GetService("TextChatService")
-                local Players = game:GetService("Players")
-                local HttpService = game:GetService("HttpService")
-                local TeleportService = game:GetService("TeleportService")
 
-                self._ServerHopperConnectionId = (self._ServerHopperConnectionId or 0) + 1
-                local ConnectionId = self._ServerHopperConnectionId
-
-                if self._ServerHopperPreviousCallback == nil then
-                    self._ServerHopperPreviousCallback = TextChatService.OnIncomingMessage
-                end
-
-                if not Value then
-                    if ConnectionId == self._ServerHopperConnectionId then
-                        TextChatService.OnIncomingMessage = self._ServerHopperPreviousCallback
-                    end
-                    return
-                end
-
-                local BannedWords = {
-                    "gen",
-                    "esp",
-                    "killaura",
-                    "autogen",
-                    "autoblock",
-                    "speedhack",
-                    "noclip",
-                    "executor",
-                    "scripter",
-                    "cheater",
-                    "exploiter",
-                    "gen hacker",
-                    "gen farmer",
-                    "gen scripter",
-                    "inf stamina",
-                    "infinite stamina",
-                    "hitbox abuser",
-                    "fast parry",
-                    "wall hacker",
-                    "health hacker"
-                }
-
-                local SearchingServer = false
-
-                local function GetAvailableServerId(PlaceId)
-                    local Url = string.format(
-                        "https://games.roproxy.com/v1/games/%s/servers/Public?sortOrder=Asc&limit=100",
-                        tostring(PlaceId)
-                    )
-
-                    local Success, Result = pcall(function()
-                        return HttpService:GetAsync(Url)
-                    end)
-
-                    if not Success or not Result then
-                        warn("Failed to fetch server list: " .. tostring(Result))
-                        return nil
-                    end
-
-                    local DecodeSuccess, Data = pcall(function()
-                        return HttpService:JSONDecode(Result)
-                    end)
-
-                    if DecodeSuccess and Data and Data.data then
-                        for _, Server in ipairs(Data.data) do
-                            if Server.playing < Server.maxPlayers and Server.id ~= game.JobId then
-                                return Server.id
-                            end
-                        end
-                    end
-
-                    return nil
-                end
-
-                local function HopServer(Player)
-                    if SearchingServer or self._ServerHopperConnectionId ~= ConnectionId then
-                        return
-                    end
-
-                    SearchingServer = true
-
-                    local TargetServerId = GetAvailableServerId(game.PlaceId)
-
-                    if TargetServerId then
-                        pcall(function()
-                            TeleportService:TeleportToPlaceInstance(game.PlaceId, TargetServerId, Player)
-                        end)
-                    else
-                        pcall(function()
-                            TeleportService:Teleport(game.PlaceId, Player)
-                        end)
-                    end
-
-                    task.delay(5, function()
-                        SearchingServer = false
-                    end)
-                end
-
-                TextChatService.OnIncomingMessage = function(Message)
-                    if self._ServerHopperConnectionId ~= ConnectionId
-                        or not GetValue("ServerHopper") then
-                        return
-                    end
-
-                    if not Message.TextSource then
-                        return
-                    end
-
-                    local UserId = Message.TextSource.UserId
-                    local Player = Players:GetPlayerByUserId(UserId)
-                    if not Player then
-                        return
-                    end
-
-                    local MessageText = string.lower(Message.Text)
-
-                    for Word in string.gmatch(MessageText, "%w+") do
-                        for _, Banned in ipairs(BannedWords) do
-                            if Word == Banned then
-                                print("Single word trigger detected ('" .. Word .. "'). Hopping server for: " .. Player.Name)
-                                HopServer(Players.LocalPlayer)
-                                return
-                            end
-                        end
-                    end
-
-                    for _, Banned in ipairs(BannedWords) do
-                        if string.find(MessageText, Banned, 1, true) then
-                            print("Phrase trigger detected ('" .. Banned .. "'). Hopping server for: " .. Player.Name)
-                            HopServer(Players.LocalPlayer)
-                            return
-                        end
-                    end
-                end
-            end
-        },
-
-        ["TimedHopper"] = {
-            ["DisplayDescription"] = "Automatically hops to another public server after 25 minutes",
-            ["DisplayTitle"] = "Timed Hopper",
-            ["LayoutOrder"] = 0.5,
-            ["Savable"] = true,
-            ["InstanceType"] = "BoolValue",
-            ["DefaultInstanceValue"] = false,
-            ["ScriptFunction"] = function(self, Value)
-                self._TimedHopperToken = (self._TimedHopperToken or 0) + 1
-                local Token = self._TimedHopperToken
-
-                if not Value then
-                    return
-                end
-
-                task.spawn(function()
-                    local StartTime = os.clock()
-
-                    while self._TimedHopperToken == Token
-                        and GetValue("TimedHopper")
-                        and os.clock() - StartTime < 25 * 60 do
-                        task.wait(1)
-                    end
-
-                    if self._TimedHopperToken ~= Token
-                        or not GetValue("TimedHopper") then
-                        return
-                    end
-
-                    local HttpService = game:GetService("HttpService")
-                    local TeleportService = game:GetService("TeleportService")
-
-                    local Url = string.format(
-                        "https://games.roproxy.com/v1/games/%s/servers/Public?sortOrder=Asc&limit=100",
-                        tostring(game.PlaceId)
-                    )
-
-                    local Success, Result = pcall(function()
-                        return HttpService:GetAsync(Url)
-                    end)
-
-                    if not Success or not Result then
-                        warn("Timed Hopper failed to fetch server list: " .. tostring(Result))
-                        return
-                    end
-
-                    local DecodeSuccess, Data = pcall(function()
-                        return HttpService:JSONDecode(Result)
-                    end)
-
-                    local TargetServerId
-                    if DecodeSuccess and Data and Data.data then
-                        for _, Server in ipairs(Data.data) do
-                            if Server.playing < Server.maxPlayers and Server.id ~= game.JobId then
-                                TargetServerId = Server.id
-                                break
-                            end
-                        end
-                    end
-
-                    if TargetServerId then
-                        pcall(function()
-                            TeleportService:TeleportToPlaceInstance(
-                                game.PlaceId,
-                                TargetServerId,
-                                Players.LocalPlayer
-                            )
-                        end)
-                    else
-                        pcall(function()
-                            TeleportService:Teleport(game.PlaceId, Players.LocalPlayer)
-                        end)
-                    end
-                end)
-            end
-        },
 
         ["AutoGeneratorPuzzle"] = {
             ["DisplayDescription"] = "Auto Completes Generator Puzzles",
@@ -802,15 +644,11 @@ local FeatureLoadout; FeatureLoadout = {
                     return
                 end
 
-                if Value then
-                    task.delay(7, function()
-                        if Token == AutoDoAllInvincibleToken
-                            and not IsLocalPlayerSpectating()
-                            and GetValue("AutoDoAllGenerators")
-                            and GetValue("Invincible", true) then
-                            GetValue("Invincible", true).Value = true
-                        end
-                    end)
+                if Value
+                    and not IsLocalPlayerSpectating()
+                    and GetValue("AutoDoAllGenerators")
+                    and GetValue("Invincible", true) then
+                    GetValue("Invincible", true).Value = true
                 end
 		-- Reset after all generators are completed when the toggle is enabled.
 		if IsAutoDoAllGeneratorsRunning
@@ -887,11 +725,12 @@ local FeatureLoadout; FeatureLoadout = {
                             local GeneratorSize = Main.Size
                             local CheckDistance = math.max(4.5, math.max(GeneratorSize.X, GeneratorSize.Z) * 0.5 + 3)
 
+                            -- Retry only from the left, right, or front.
+                            -- Never retry from behind the generator.
                             GeneratorPositions = {
                                 GeneratorCFrame.Position + GeneratorCFrame.RightVector * CheckDistance,
                                 GeneratorCFrame.Position - GeneratorCFrame.RightVector * CheckDistance,
-                                GeneratorCFrame.Position + GeneratorCFrame.LookVector * CheckDistance,
-                                GeneratorCFrame.Position - GeneratorCFrame.LookVector * CheckDistance
+                                GeneratorCFrame.Position + GeneratorCFrame.LookVector * CheckDistance
                             }
                         end
 
@@ -901,6 +740,22 @@ local FeatureLoadout; FeatureLoadout = {
                             end
 
                             if LocalCharacter.PivotTo then
+                                local SafeParams = RaycastParams.new()
+                                SafeParams.FilterType = Enum.RaycastFilterType.Exclude
+                                SafeParams.FilterDescendantsInstances = {LocalCharacter, Object}
+
+                                local OccupyingParts = workspace:GetPartBoundsInBox(
+                                    CFrame.new(Position),
+                                    Vector3.new(3, 5, 3),
+                                    SafeParams
+                                )
+
+                                for _, Part in ipairs(OccupyingParts) do
+                                    if Part.CanCollide then
+                                        return false
+                                    end
+                                end
+
                                 LocalCharacter:PivotTo(CFrame.new(Position))
                                 task.wait(0.15)
                             end
@@ -1171,8 +1026,28 @@ local FeatureLoadout; FeatureLoadout = {
             ["Requirement"] = (KillerAssets and KillerAssets:FindFirstChild("Azure") and "require" or true),
             ["ScriptFunction"] = function(self, Value)
                 if CurrentQTEAzure and Value then
-                    CurrentQTEAzure:AddProgress(100)
-                    CurrentQTEAzure = nil
+                    local QTEAzure = CurrentQTEAzure
+                    task.spawn(function()
+                        for _ = 1, 40 do
+                            if not GetValue("AutoDisarm")
+                                or CurrentQTEAzure ~= QTEAzure
+                                or typeof(QTEAzure) ~= "table"
+                                or not QTEAzure.AddProgress then
+                                break
+                            end
+
+                            local Success = pcall(function()
+                                QTEAzure:AddProgress(100)
+                            end)
+
+                            if Success then
+                                CurrentQTEAzure = nil
+                                break
+                            end
+
+                            task.wait(0.05)
+                        end
+                    end)
                 end
             end,
             ["CustomSetup"] = function(self)
@@ -1182,18 +1057,27 @@ local FeatureLoadout; FeatureLoadout = {
                     task.delay(1,function()
                         local origin;origin = hookfunction(RequiredModule.new,function(...)
                             local QTEAzure = origin(...)
-                            task.delay(0.05,function()
-                                if typeof(QTEAzure) == "table" and QTEAzure.AddProgress then
-                                    if GetValue("AutoDisarm") then
-                                        QTEAzure:AddProgress(100)
+                            task.spawn(function()
+                                for _ = 1, 40 do
+                                    if typeof(QTEAzure) ~= "table" or not QTEAzure.AddProgress then
+                                        task.wait(0.05)
+                                    elseif GetValue("AutoDisarm") then
+                                        local Success = pcall(function()
+                                            QTEAzure:AddProgress(100)
+                                        end)
+
+                                        if Success then
+                                            break
+                                        end
+
+                                        task.wait(0.05)
                                     else
                                         CurrentQTEAzure = QTEAzure
+                                        break
                                     end
-                                else
-                                    warn("Failed Doing QTE For Azure")
                                 end
                             end)
-                            return QTEAzure 
+                            return QTEAzure
                         end)
                     end)
                 end
@@ -1991,10 +1875,114 @@ local FeatureLoadout; FeatureLoadout = {
                 end)
             end
         },
+        ["AutoBlockHitboxAllKiller"] = {
+            ["DisplayDescription"] = "Adjust the Auto Block hitbox size for every killer (studs)",
+            ["DisplayTitle"] = "All Killer ABH",
+            ["LayoutOrder"] = 17,
+            ["Savable"] = true,
+            ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 0,
+            ["Requirement"] = "AutoBlock",
+            ["ExtraData"] = {
+                ["MaxValue"] = 5,
+                ["MinValue"] = -3,
+                ["Step"] = 0.25
+            }
+        },
+        ["AutoBlockHitboxSlasher"] = {
+            ["DisplayDescription"] = "Slasher ABH size adjustment (studs)",
+            ["DisplayTitle"] = "Slasher ABH",
+            ["LayoutOrder"] = 18,
+            ["Savable"] = true,
+            ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 0,
+            ["Requirement"] = "AutoBlock",
+            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
+        },
+        ["AutoBlockHitboxJohnDoe"] = {
+            ["DisplayDescription"] = "John Doe ABH size adjustment (studs)",
+            ["DisplayTitle"] = "John Doe ABH",
+            ["LayoutOrder"] = 19,
+            ["Savable"] = true,
+            ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 0,
+            ["Requirement"] = "AutoBlock",
+            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
+        },
+        ["AutoBlockHitboxSixer"] = {
+            ["DisplayDescription"] = "Sixer ABH size adjustment (studs)",
+            ["DisplayTitle"] = "Sixer ABH",
+            ["LayoutOrder"] = 20,
+            ["Savable"] = true,
+            ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 0,
+            ["Requirement"] = "AutoBlock",
+            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
+        },
+        ["AutoBlockHitboxNosferatu"] = {
+            ["DisplayDescription"] = "Nosferatu ABH size adjustment (studs)",
+            ["DisplayTitle"] = "Nosferatu ABH",
+            ["LayoutOrder"] = 21,
+            ["Savable"] = true,
+            ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 0,
+            ["Requirement"] = "AutoBlock",
+            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
+        },
+        ["AutoBlockHitboxNoli"] = {
+            ["DisplayDescription"] = "Noli ABH size adjustment (studs)",
+            ["DisplayTitle"] = "Noli ABH",
+            ["LayoutOrder"] = 22,
+            ["Savable"] = true,
+            ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 0,
+            ["Requirement"] = "AutoBlock",
+            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
+        },
+        ["AutoBlockHitboxC00lkidd"] = {
+            ["DisplayDescription"] = "C00lkidd ABH size adjustment (studs)",
+            ["DisplayTitle"] = "C00lkidd ABH",
+            ["LayoutOrder"] = 23,
+            ["Savable"] = true,
+            ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 0,
+            ["Requirement"] = "AutoBlock",
+            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
+        },
+        ["AutoBlockHitboxAzure"] = {
+            ["DisplayDescription"] = "Azure ABH size adjustment (studs)",
+            ["DisplayTitle"] = "Azure ABH",
+            ["LayoutOrder"] = 24,
+            ["Savable"] = true,
+            ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 0,
+            ["Requirement"] = "AutoBlock",
+            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
+        },
+        ["AutoBlockHitbox1x1x1x1"] = {
+            ["DisplayDescription"] = "1x1x1x1 ABH size adjustment (studs)",
+            ["DisplayTitle"] = "1x1x1x1 ABH",
+            ["LayoutOrder"] = 25,
+            ["Savable"] = true,
+            ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 0,
+            ["Requirement"] = "AutoBlock",
+            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
+        },
+        ["AutoBlockHitboxGolemslash"] = {
+            ["DisplayDescription"] = "Golem Slash ABH size adjustment (studs)",
+            ["DisplayTitle"] = "Golem Slash ABH",
+            ["LayoutOrder"] = 26,
+            ["Savable"] = true,
+            ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 0,
+            ["Requirement"] = "AutoBlock",
+            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
+        },
         ["AutoBlock"] = {
             ["DisplayDescription"] = "Uses the block ability automatically when about to get hit (REQUIRES GOOD PING)",
             ["DisplayTitle"] = "Guest1337 Auto Block",
-            ["LayoutOrder"] = 14,
+            ["LayoutOrder"] = 15,
             ["Savable"] = true,
             ["InstanceType"] = "BoolValue",
             ["DefaultInstanceValue"] = false,
@@ -2048,19 +2036,242 @@ local FeatureLoadout; FeatureLoadout = {
                 local Humanoid = Killer:FindFirstChildOfClass("Humanoid") or Killer:WaitForChild("Humanoid")
                 local QueryHitbox = Killer:FindFirstChild("QueryHitbox") or Killer:WaitForChild("QueryHitbox")
                 local KillerAnimator = Humanoid:FindFirstChildOfClass("Animator")
+                -- Patch 167: C00lkidd is sound-only. Its sound watcher is isolated from
+                -- the normal animation detector so regular Auto Block remains unchanged.
+                local C00lkiddAttackSounds = {
+                    ["80516583309685"] = true,
+                    ["75330693422988"] = true,
+                    ["84307400688050"] = true,
+                    ["82221759983649"] = true,
+                    ["105516183226360"] = true,
+                    ["124234993291213"] = true
+                }
+
+                local C00lkiddSoundConnections = {}
+                local C00lkiddSoundLastTrigger = {}
+
+                local function GetC00lkiddSoundAssetId(Sound)
+                    if not Sound or not Sound:IsA("Sound") then return nil end
+                    return tostring(Sound.SoundId or ""):match("%d+")
+                end
+
+                local function RunC00lkiddSoundAutoBlock()
+                    if not GetValue("AutoBlock") or IsHelplessActive() then return end
+                    if string.lower(Killer.Name or "") ~= "c00lkidd" then return end
+                    if not LocalCharacter or not LocalCharacter:FindFirstChild("QueryHitbox") or LocalCharacter.Parent ~= SurvivorsFolder then return end
+                    local AbilityContainer = MainUI and MainUI:FindFirstChild("AbilityContainer")
+                    local BlockButton = AbilityContainer and AbilityContainer:FindFirstChild("Block")
+                    if not BlockButton then return end
+
+                    local CustomHitbox = CustomHitboxes["c00lkidd"]
+                    local KillerNameLower = Killer.Name:lower()
+                    for i = 1, 12 do
+                        if IsHelplessActive() or not GetValue("AutoBlock") then return end
+                        SelfParams.FilterDescendantsInstances = {LocalCharacter:FindFirstChild("QueryHitbox")}
+                        local Part = Instance.new("Part")
+                        Part.Name = "KillerDetectHitbox"
+                        Part.Color = BrickColor.new("Really black").Color
+
+                        local BaseHitboxSize = (CustomHitbox and CustomHitbox["Size"] or Vector3.new(5.2, 6, 5.65)) * 2.2
+                        local GlobalHitboxAdjustment = GetCurrentHitboxAdjustment("AutoBlockHitboxAllKiller")
+                        local IndividualHitboxAdjustment = GetCurrentHitboxAdjustment("AutoBlockHitboxC00lkidd")
+                        local TotalHitboxAdjustment = GlobalHitboxAdjustment + IndividualHitboxAdjustment
+                        Part.Size = BaseHitboxSize + Vector3.new(TotalHitboxAdjustment, TotalHitboxAdjustment, TotalHitboxAdjustment)
+                        Part.Size = Vector3.new(math.max(0.1, Part.Size.X), math.max(0.1, Part.Size.Y), math.max(0.1, Part.Size.Z))
+
+                        local DetectionOffset = CustomHitbox and CustomHitbox["Offset"] or CFrame.new(0,0,-3.5)
+                        if GetValue("DragBlock", false) then
+                            Part.Size = Part.Size + Vector3.new(0,0,2)
+                            Part.CFrame = QueryHitbox.CFrame * DetectionOffset * CFrame.new(0,0,-1)
+                        else
+                            Part.CFrame = QueryHitbox.CFrame * DetectionOffset
+                        end
+
+                        if KillerNameLower == "c00lkidd" then
+                            -- Reduce only the forward reach by 2 studs while keeping the rear edge fixed.
+                            Part.Size = Vector3.new(
+                                math.max(0.1, Part.Size.X),
+                                math.max(0.1, Part.Size.Y),
+                                math.max(0.1, Part.Size.Z - 2)
+                            )
+                            Part.CFrame = Part.CFrame * CFrame.new(0, 0, 1)
+                        end
+
+                        Part.CanCollide = false
+                        Part.Anchored = true
+                        Part.CastShadow = false
+                        Part.Material = Enum.Material.ForceField
+                        Part.Transparency = ShowHitboxesSetting.Value and 0.1 or 1
+                        Part.Parent = Hitboxes
+                        Debris:AddItem(Part, 0.4)
+
+                        local Hitbox = workspace:GetPartsInPart(Part, SelfParams)
+                        if #Hitbox > 0 then
+                            if FireSignal and BlockButton then
+                                FireSignal(BlockButton.MouseButton1Click)
+                            elseif GetValue("OfficialGame") and UseActorAbility then
+                                UseActorAbility:FireServer("UseActorAbility", {"Block"})
+                            elseif UseActorAbility then
+                                UseActorAbility:FireServer("UseActorAbility", "Block")
+                                UseActorAbility:FireServer("UseActorAbility", {"Block"})
+                            end
+                            if GetValue("DragBlock", false) and not IsHelplessActive() then
+                                DragBlockAttackingKiller(Killer)
+                            end
+                            break
+                        end
+                        task.wait(0.02)
+                    end
+                end
+
+                local function WatchC00lkiddSound(Sound)
+                    if not Sound or not Sound:IsA("Sound") then return end
+                    local SoundId = GetC00lkiddSoundAssetId(Sound)
+                    if not SoundId or not C00lkiddAttackSounds[SoundId] or C00lkiddSoundConnections[Sound] then return end
+
+                    local function Trigger()
+                        if not Sound.Parent or not Sound.Playing then return end
+                        if not GetValue("AutoBlock") or IsHelplessActive() then return end
+                        local Now = os.clock()
+                        if C00lkiddSoundLastTrigger[Sound] and Now - C00lkiddSoundLastTrigger[Sound] < 0.08 then return end
+                        C00lkiddSoundLastTrigger[Sound] = Now
+                        task.spawn(RunC00lkiddSoundAutoBlock)
+                    end
+
+                    C00lkiddSoundConnections[Sound] = Sound:GetPropertyChangedSignal("Playing"):Connect(Trigger)
+                    if Sound.Playing then Trigger() end
+                end
+
+                if string.lower(Killer.Name or "") == "c00lkidd" then
+                    for _, Descendant in Killer:GetDescendants() do
+                        if Descendant:IsA("Sound") then
+                            WatchC00lkiddSound(Descendant)
+                        end
+                    end
+                    Killer.DescendantAdded:Connect(function(Descendant)
+                        if Descendant:IsA("Sound") then
+                            WatchC00lkiddSound(Descendant)
+                        end
+                    end)
+                end
                 if KillerAnimator then
                     KillerAnimator.AnimationPlayed:Connect(function(Track)
-                        if GetValue("AutoBlock") and Players:GetPlayerFromCharacter(Killer) then
+                        if Players:GetPlayerFromCharacter(Killer) and string.lower(Killer.Name or "") ~= "c00lkidd" then
                             local AnimType,KillerName = GetAnimationType(Track.Animation.AnimationId)
-                            if AnimType and type(AnimType) == type("") and table.find(BlockableAttacks,AnimType:lower()) and LocalCharacter and LocalCharacter:FindFirstChild("QueryHitbox") and LocalCharacter.Parent == SurvivorsFolder and MainUI:FindFirstChild("AbilityContainer") and MainUI:FindFirstChild("AbilityContainer"):FindFirstChild("Block") then
+                            if AnimType and type(AnimType) == type("") and table.find(BlockableAttacks,AnimType:lower()) then
+                                local CustomHitbox = CustomHitboxes[AnimType:lower()] or CustomHitboxes[Killer.Name:lower()]
+
+                                -- Patch 159: show the same Auto Block hitbox while the local player is the killer.
+                                -- This is a visualization-only preview and does not attempt to block while playing killer.
+                                if LocalCharacter == Killer then
+                                    local PreviewHitbox = Instance.new("Part")
+                                    PreviewHitbox.Name = "KillerDetectHitboxPreview"
+                                    PreviewHitbox.Color = BrickColor.new("Really black").Color
+
+                                    local BasePreviewSize = (CustomHitbox and CustomHitbox["Size"] or Vector3.new(5.2, 6, 5.65)) * 2.2
+                                    local GlobalPreviewAdjustment = GetCurrentHitboxAdjustment("AutoBlockHitboxAllKiller")
+                                    local PreviewKillerNameLower = Killer.Name:lower()
+                                    local PreviewKillerHitboxKeys = {
+                                        ["slasher"] = "AutoBlockHitboxSlasher",
+                                        ["johndoe"] = "AutoBlockHitboxJohnDoe",
+                                        ["sixer"] = "AutoBlockHitboxSixer",
+                                        ["nosferatu"] = "AutoBlockHitboxNosferatu",
+                                        ["noli"] = "AutoBlockHitboxNoli",
+                                        ["1x1x1x1"] = "AutoBlockHitbox1x1x1x1",
+                                        ["c00lkidd"] = "AutoBlockHitboxC00lkidd",
+                                        ["azure"] = "AutoBlockHitboxAzure"
+                                    }
+                                    local PreviewKillerHitboxKey = PreviewKillerHitboxKeys[PreviewKillerNameLower] or ("AutoBlockHitbox" .. Killer.Name:gsub("[^%w]", ""))
+                                    if AnimType:lower() == "golemslash" then
+                                        PreviewKillerHitboxKey = "AutoBlockHitboxGolemslash"
+                                    end
+
+                                    local IndividualPreviewAdjustment = GetCurrentHitboxAdjustment(PreviewKillerHitboxKey)
+                                    local TotalPreviewAdjustment = GlobalPreviewAdjustment + IndividualPreviewAdjustment
+                                    PreviewHitbox.Size = BasePreviewSize + Vector3.new(TotalPreviewAdjustment, TotalPreviewAdjustment, TotalPreviewAdjustment)
+                                    PreviewHitbox.Size = Vector3.new(
+                                        math.max(0.1, PreviewHitbox.Size.X),
+                                        math.max(0.1, PreviewHitbox.Size.Y),
+                                        math.max(0.1, PreviewHitbox.Size.Z)
+                                    )
+
+                                    local PreviewOffset = CustomHitbox and CustomHitbox["Offset"] or CFrame.new(0,0,-3.5)
+                                    if GetValue("DragBlock", false) then
+                                        PreviewHitbox.Size = PreviewHitbox.Size + Vector3.new(0,0,2)
+                                        PreviewHitbox.CFrame = QueryHitbox.CFrame * PreviewOffset * CFrame.new(0,0,-1)
+                                    else
+                                        PreviewHitbox.CFrame = QueryHitbox.CFrame * PreviewOffset
+                                    end
+
+                                    if PreviewKillerNameLower == "c00lkidd" then
+                                        PreviewHitbox.Size = Vector3.new(
+                                            math.max(0.1, PreviewHitbox.Size.X),
+                                            math.max(0.1, PreviewHitbox.Size.Y),
+                                            math.max(0.1, PreviewHitbox.Size.Z - 2)
+                                        )
+                                        PreviewHitbox.CFrame = PreviewHitbox.CFrame * CFrame.new(0, 0, 1)
+                                    end
+
+                                    PreviewHitbox.CanCollide = false
+                                    PreviewHitbox.Anchored = true
+                                    PreviewHitbox.CastShadow = false
+                                    PreviewHitbox.Material = Enum.Material.ForceField
+                                    PreviewHitbox.Transparency = 0.1
+                                    PreviewHitbox.Parent = Hitboxes
+                                    Debris:AddItem(PreviewHitbox, 0.4)
+                                    return
+                                end
+
+                                if GetValue("AutoBlock") and LocalCharacter and LocalCharacter:FindFirstChild("QueryHitbox") and LocalCharacter.Parent == SurvivorsFolder and MainUI:FindFirstChild("AbilityContainer") and MainUI:FindFirstChild("AbilityContainer"):FindFirstChild("Block") then
                                 local CustomHitbox = CustomHitboxes[AnimType:lower()] or CustomHitboxes[Killer.Name:lower()]
                                 for i = 1,12 do
                                     SelfParams.FilterDescendantsInstances = {LocalCharacter:FindFirstChild("QueryHitbox")}
                                     local Part = Instance.new("Part")
                                     Part.Name = "KillerDetectHitbox"
                                     Part.Color = BrickColor.new("Really black").Color
-                                    Part.Size =  (CustomHitbox and CustomHitbox["Size"] or Vector3.new(5.2, 6, 5.65)) * 2.2
-                                    Part.CFrame = QueryHitbox.CFrame * (CustomHitbox and CustomHitbox["Offset"] or CFrame.new(0,0,-3.5))
+                                    local BaseHitboxSize = (CustomHitbox and CustomHitbox["Size"] or Vector3.new(5.2, 6, 5.65)) * 2.2
+                                    local GlobalHitboxAdjustment = GetCurrentHitboxAdjustment("AutoBlockHitboxAllKiller")
+                                    local KillerNameLower = Killer.Name:lower()
+                                    local KillerHitboxKeys = {
+                                        ["slasher"] = "AutoBlockHitboxSlasher",
+                                        ["johndoe"] = "AutoBlockHitboxJohnDoe",
+                                        ["sixer"] = "AutoBlockHitboxSixer",
+                                        ["nosferatu"] = "AutoBlockHitboxNosferatu",
+                                        ["noli"] = "AutoBlockHitboxNoli",
+                                        ["1x1x1x1"] = "AutoBlockHitbox1x1x1x1",
+                                        ["c00lkidd"] = "AutoBlockHitboxC00lkidd",
+                                        ["azure"] = "AutoBlockHitboxAzure"
+                                    }
+                                    local KillerHitboxKey = KillerHitboxKeys[KillerNameLower] or ("AutoBlockHitbox" .. Killer.Name:gsub("[^%w]", ""))
+                                    if AnimType and AnimType:lower() == "golemslash" then
+                                        KillerHitboxKey = "AutoBlockHitboxGolemslash"
+                                    end
+                                    local IndividualHitboxAdjustment = GetCurrentHitboxAdjustment(KillerHitboxKey)
+                                    local TotalHitboxAdjustment = GlobalHitboxAdjustment + IndividualHitboxAdjustment
+                                    Part.Size = BaseHitboxSize + Vector3.new(TotalHitboxAdjustment, TotalHitboxAdjustment, TotalHitboxAdjustment)
+                                    Part.Size = Vector3.new(
+                                        math.max(0.1, Part.Size.X),
+                                        math.max(0.1, Part.Size.Y),
+                                        math.max(0.1, Part.Size.Z)
+                                    )
+                                    local DetectionOffset = CustomHitbox and CustomHitbox["Offset"] or CFrame.new(0,0,-3.5)
+                                    if GetValue("DragBlock", false) then
+                                        -- Make the detection hitbox 2 studs deeper toward the killer/front.
+                                        -- The rear edge stays in the same place; this changes the hitbox size, not just its offset.
+                                        Part.Size = Part.Size + Vector3.new(0,0,2)
+                                        Part.CFrame = QueryHitbox.CFrame * DetectionOffset * CFrame.new(0,0,-1)
+                                    else
+                                        Part.CFrame = QueryHitbox.CFrame * DetectionOffset
+                                    end
+                                    if KillerNameLower == "c00lkidd" then
+                                        -- Reduce only the forward reach by 2 studs while keeping the rear edge fixed.
+                                        Part.Size = Vector3.new(
+                                            math.max(0.1, Part.Size.X),
+                                            math.max(0.1, Part.Size.Y),
+                                            math.max(0.1, Part.Size.Z - 2)
+                                        )
+                                        Part.CFrame = Part.CFrame * CFrame.new(0, 0, 1)
+                                    end
                                     Part.CanCollide = false
                                     Part.Anchored = true
                                     Part.CastShadow = false
@@ -2089,6 +2300,7 @@ local FeatureLoadout; FeatureLoadout = {
                                         break
                                     end
                                     task.wait(0.02)
+                                end
                                 end
                             end
                         end
@@ -2128,7 +2340,7 @@ local FeatureLoadout; FeatureLoadout = {
         ["AutoPunch"] = {
             ["DisplayDescription"] = "Uses the punch ability when you block successfully",
             ["DisplayTitle"] = "Guest1337 Auto Punch",
-            ["LayoutOrder"] = 15,
+            ["LayoutOrder"] = 14,
             ["Savable"] = true,
             ["InstanceType"] = "BoolValue",
             ["DefaultInstanceValue"] = false,
@@ -2188,11 +2400,20 @@ local FeatureLoadout; FeatureLoadout = {
                         end
                         local CameraTarget 
                         local SelectedVelocity
+                        local LookAtUntil = os.clock() + 0.4
                         CameraTarget = RunService.RenderStepped:Connect(function()
+                            if os.clock() >= LookAtUntil then
+                                CameraTarget:Disconnect()
+                                return
+                            end
                             local ClosestKiller,Dis = self:GetClosestKiller()
                             if not ClosestKiller or not ClosestKiller:FindFirstChild("HumanoidRootPart") then return end
                             local KillerRootPos = ClosestKiller:FindFirstChild("HumanoidRootPart").Position
                             local SelectedPosition = Vector3.new(KillerRootPos.X,LocalRoot.Position.Y,KillerRootPos.Z)
+                            -- Moved from Drag Block: keep the survivor facing the killer during Auto Punch.
+                            if (SelectedPosition - LocalRoot.Position).Magnitude > 0.05 then
+                                LocalRoot.CFrame = CFrame.lookAt(LocalRoot.Position, SelectedPosition)
+                            end
                             local TargetCFrame = CFrame.new(LocalRoot.Position, SelectedPosition)
                             LocalCharacter:SetPrimaryPartCFrame(TargetCFrame)
                             if not SelectedVelocity then
@@ -2232,10 +2453,38 @@ local FeatureLoadout; FeatureLoadout = {
             },
             ["ScriptFunction"] = function(self, Value) end
         },
+        ["DragBlockStopDistance"] = {
+            ["DisplayDescription"] = "How close Drag Block stops the player near the killer (studs)",
+            ["DisplayTitle"] = "Stop Near Killer (Studs)",
+            ["LayoutOrder"] = 16.1,
+            ["Savable"] = true,
+            ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 3,
+            ["Requirement"] = "AutoBlock|DragBlock",
+            ["ExtraData"] = {
+                ["MaxValue"] = 10,
+                ["MinValue"] = 0.5,
+                ["Step"] = 0.25
+            }
+        },
+        ["DragBlockHoldDuration"] = {
+            ["DisplayDescription"] = "How long Drag Block holds the player toward the killer (seconds)",
+            ["DisplayTitle"] = "Hold Player Duration",
+            ["LayoutOrder"] = 16.2,
+            ["Savable"] = true,
+            ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 0.2,
+            ["Requirement"] = "AutoBlock|DragBlock",
+            ["ExtraData"] = {
+                ["MaxValue"] = 2,
+                ["MinValue"] = 0.05,
+                ["Step"] = 0.05
+            }
+        },
         ["EnableOverride"] = {
             ["DisplayDescription"] = "Overrides the puzzle grid size of the generators",
             ["DisplayTitle"] = "Override Generator(s) Grid Size",
-            ["LayoutOrder"] = 16,
+            ["LayoutOrder"] = 27,
             ["Savable"] = true,
             ["InstanceType"] = "BoolValue",
             ["DefaultInstanceValue"] = false,
@@ -2244,7 +2493,7 @@ local FeatureLoadout; FeatureLoadout = {
         ["GridSize"] = {
             ["DisplayDescription"] = "The Size to override for the Generator's Puzzle",
             ["DisplayTitle"] = "Generator(s) Grid Size",
-            ["LayoutOrder"] = 17,
+            ["LayoutOrder"] = 28,
             ["Savable"] = true,
             ["InstanceType"] = "NumberValue",
             ["DefaultInstanceValue"] = 6,
@@ -3813,6 +4062,24 @@ end
 
 function GetFunction(Function1, Function2)
     return typeof(Function1) == "function" and Function1 or (typeof(Function2) == "function" and Function2) or nil
+end
+
+-- Patch 168: Always read the current ABH NumberValue from the settings folder.
+-- Some menu implementations can replace the NumberValue when a slider changes,
+-- which would leave the cached Values[] entry pointing at the old value.
+function GetCurrentHitboxAdjustment(FeatureName)
+    local CurrentInstance = PlusFolderSettings and PlusFolderSettings:FindFirstChild(FeatureName, true)
+    if CurrentInstance and CurrentInstance:IsA("NumberValue") then
+        Values[FeatureName] = CurrentInstance
+        return tonumber(CurrentInstance.Value) or 0
+    end
+
+    local CachedInstance = Values[FeatureName]
+    if CachedInstance and CachedInstance:IsA("NumberValue") then
+        return tonumber(CachedInstance.Value) or 0
+    end
+
+    return 0
 end
 
 function RichTextGradientColor(Text:string,Colors)
