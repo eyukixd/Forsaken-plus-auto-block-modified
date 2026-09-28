@@ -84,6 +84,8 @@ IgnoreKeybinds = {"W", "A", "S", "D"}
 GameVersionForScript = "2026-09-25"
 -- Physically walks toward the killer while Auto Block is active.
 -- All survivor movement inputs are blocked until the routine finishes.
+-- Drag Block and Drag Block Guarantee use the same shared cooldown,
+-- while each configuration keeps its own movement/stop slider.
 local DragBlockBusy = false
 local DragBlockToken = 0
 local DragBlockLastStart = 0
@@ -98,7 +100,7 @@ local function IsHelplessActive()
     return LocalCharacter:GetAttribute("AbilitiesDisabled") == true
 end
 
-local function DragBlockAttackingKiller(Killer)
+local function DragBlockAttackingKiller(Killer, GuaranteeMovementDistance)
     if DragBlockBusy or not GetValue("DragBlock", false) then return end
     if IsHelplessActive() then return end
     if os.clock() - DragBlockLastStart < FOLLOW_KILLER_COOLDOWN then return end
@@ -117,9 +119,11 @@ local function DragBlockAttackingKiller(Killer)
     local MovementActionName = "AutoBlockFollowMovementOverride"
     -- C00lkidd stops 2 studs away; every other killer keeps the 3-stud distance.
     local KillerNameLower = string.lower(Killer.Name or "")
-    local STOP_DISTANCE = tonumber(GetValue("DragBlockStopDistance")) or (KillerNameLower:find("c00lkidd", 1, true) and 2 or 3)
+    -- Normal Drag Block uses DragBlockStopDistance.
+    -- Drag Block Guarantee uses its separate DragBlockGuaranteeMovement value.
+    local STOP_DISTANCE = tonumber(GuaranteeMovementDistance) or tonumber(GetValue("DragBlockStopDistance")) or (KillerNameLower:find("c00lkidd", 1, true) and 2 or 3)
     local FOLLOW_DURATION = tonumber(GetValue("DragBlockHoldDuration")) or 0.2
-    local WALK_DISTANCE_ONCE = 3
+    local WALK_DISTANCE_ONCE = math.max(0.5, tonumber(GuaranteeMovementDistance) or 3)
 
     DragBlockBusy = true
     DragBlockLastStart = os.clock()
@@ -1026,55 +1030,34 @@ local FeatureLoadout; FeatureLoadout = {
             ["Requirement"] = (KillerAssets and KillerAssets:FindFirstChild("Azure") and "require" or true),
             ["ScriptFunction"] = function(self, Value)
                 if CurrentQTEAzure and Value then
-                    local QTEAzure = CurrentQTEAzure
-                    task.spawn(function()
-                        for _ = 1, 40 do
-                            if not GetValue("AutoDisarm")
-                                or CurrentQTEAzure ~= QTEAzure
-                                or typeof(QTEAzure) ~= "table"
-                                or not QTEAzure.AddProgress then
-                                break
-                            end
-
-                            local Success = pcall(function()
-                                QTEAzure:AddProgress(100)
-                            end)
-
-                            if Success then
-                                CurrentQTEAzure = nil
-                                break
-                            end
-
-                            task.wait(0.05)
-                        end
+                    local Success = pcall(function()
+                        CurrentQTEAzure:AddProgress(100)
                     end)
+                    if Success then
+                        CurrentQTEAzure = nil
+                    end
                 end
             end,
             ["CustomSetup"] = function(self)
-                local AzureQTE = KillerAssets and KillerAssets:FindFirstChild("Azure") and KillerAssets:FindFirstChild("Azure"):FindFirstChild("cl_ConstructQTE",true)
+                local Azure = KillerAssets and KillerAssets:FindFirstChild("Azure")
+                local AzureQTE = Azure and Azure:FindFirstChild("cl_ConstructQTE", true)
                 if IsRequireSupported and AzureQTE then
                     local RequiredModule = require(AzureQTE)
-                    task.delay(1,function()
-                        local origin;origin = hookfunction(RequiredModule.new,function(...)
+                    task.delay(1, function()
+                        local origin
+                        origin = hookfunction(RequiredModule.new, function(...)
                             local QTEAzure = origin(...)
-                            task.spawn(function()
-                                for _ = 1, 40 do
-                                    if typeof(QTEAzure) ~= "table" or not QTEAzure.AddProgress then
-                                        task.wait(0.05)
-                                    elseif GetValue("AutoDisarm") then
-                                        local Success = pcall(function()
+                            task.delay(0.05, function()
+                                if typeof(QTEAzure) == "table" and QTEAzure.AddProgress then
+                                    if GetValue("AutoDisarm") then
+                                        pcall(function()
                                             QTEAzure:AddProgress(100)
                                         end)
-
-                                        if Success then
-                                            break
-                                        end
-
-                                        task.wait(0.05)
                                     else
                                         CurrentQTEAzure = QTEAzure
-                                        break
                                     end
+                                else
+                                    warn("Failed Doing QTE For Azure")
                                 end
                             end)
                             return QTEAzure
@@ -1979,6 +1962,29 @@ local FeatureLoadout; FeatureLoadout = {
             ["Requirement"] = "AutoBlock",
             ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
         },
+        ["DragBlockGuaranteeABH"] = {
+            ["DisplayDescription"] = "Drag Block V2 BETA",
+            ["DisplayTitle"] = "Drag Block Guarantee ABH",
+            ["LayoutOrder"] = 15.1,
+            ["Savable"] = true,
+            ["InstanceType"] = "BoolValue",
+            ["DefaultInstanceValue"] = false,
+            ["Requirement"] = "AutoBlock|DragBlock"
+        },
+        ["DragBlockGuaranteeMovement"] = {
+            ["DisplayDescription"] = "How far the separate Drag Block Guarantee ABH moves the player toward the killer (studs)",
+            ["DisplayTitle"] = "Guarantee Drag Movement (Studs)",
+            ["LayoutOrder"] = 15.2,
+            ["Savable"] = true,
+            ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 3,
+            ["Requirement"] = "AutoBlock|DragBlock|DragBlockGuaranteeABH",
+            ["ExtraData"] = {
+                ["MaxValue"] = 10,
+                ["MinValue"] = 0.5,
+                ["Step"] = 0.25
+            }
+        },
         ["AutoBlock"] = {
             ["DisplayDescription"] = "Uses the block ability automatically when about to get hit (REQUIRES GOOD PING)",
             ["DisplayTitle"] = "Guest1337 Auto Block",
@@ -2033,6 +2039,18 @@ local FeatureLoadout; FeatureLoadout = {
                 SelfParams.FilterType = Enum.RaycastFilterType.Include
                 local UseActorAbility = Network and Network:FindFirstChildOfClass("RemoteEvent")
                 local ShowHitboxesSetting = PlayerData and PlayerData:FindFirstChild("Settings") and PlayerData.Settings:FindFirstChild("ShowHitboxes",true)
+                -- Separate Drag Block Guarantee ABH counter.
+                -- This counts attack events, not the 12 internal detection checks.
+                local DragBlockGuaranteeABHCount = 0
+                local function ShouldRunDragBlockGuaranteeABH()
+                    if not GetValue("DragBlockGuaranteeABH", false)
+                        or not GetValue("DragBlock", false)
+                        or not GetValue("AutoBlock", false) then
+                        return false
+                    end
+                    DragBlockGuaranteeABHCount += 1
+                    return DragBlockGuaranteeABHCount % 4 == 0
+                end
                 local Humanoid = Killer:FindFirstChildOfClass("Humanoid") or Killer:WaitForChild("Humanoid")
                 local QueryHitbox = Killer:FindFirstChild("QueryHitbox") or Killer:WaitForChild("QueryHitbox")
                 local KillerAnimator = Humanoid:FindFirstChildOfClass("Animator")
@@ -2055,6 +2073,82 @@ local FeatureLoadout; FeatureLoadout = {
                     return tostring(Sound.SoundId or ""):match("%d+")
                 end
 
+                -- Separate Drag Block Guarantee ABH system.
+                -- This never modifies the normal ABH. It creates its own 7 x 6 x 9 hitbox
+                -- on every 4th attack event and keeps checking it for the same short window.
+                local function RunDragBlockGuaranteeABH(DetectionOffset)
+                    if not GetValue("DragBlockGuaranteeABH", false)
+                        or not GetValue("DragBlock", false)
+                        or not GetValue("AutoBlock", false)
+                        or IsHelplessActive() then
+                        return
+                    end
+                    if not LocalCharacter or LocalCharacter.Parent ~= SurvivorsFolder then return end
+                    local LocalQueryHitbox = LocalCharacter:FindFirstChild("QueryHitbox")
+                    local AbilityContainer = MainUI and MainUI:FindFirstChild("AbilityContainer")
+                    local BlockButton = AbilityContainer and AbilityContainer:FindFirstChild("Block")
+                    if not LocalQueryHitbox or not BlockButton or not QueryHitbox then return end
+
+                    local GuaranteeParams = OverlapParams.new()
+                    GuaranteeParams.MaxParts = 1
+                    GuaranteeParams.FilterType = Enum.RaycastFilterType.Include
+                    GuaranteeParams.FilterDescendantsInstances = {LocalQueryHitbox}
+
+                    local GuaranteePart = Instance.new("Part")
+                    GuaranteePart.Name = "DragBlockGuaranteeABH"
+                    GuaranteePart.Color = BrickColor.new("Really black").Color
+                    -- 7 studs side-to-side, 9 studs front-to-back.
+                    -- It uses the same attack offset as the normal ABH and adds no displacement.
+                    GuaranteePart.Size = Vector3.new(7, 6, 9)
+                    GuaranteePart.CanCollide = false
+                    GuaranteePart.Anchored = true
+                    GuaranteePart.CastShadow = false
+                    GuaranteePart.Material = Enum.Material.ForceField
+                    GuaranteePart.Transparency = ShowHitboxesSetting.Value and 0.1 or 1
+                    GuaranteePart.Parent = Hitboxes
+                    Debris:AddItem(GuaranteePart, 0.4)
+
+                    for _ = 1, 12 do
+                        if IsHelplessActive()
+                            or not GetValue("AutoBlock", false)
+                            or not GetValue("DragBlock", false)
+                            or not GetValue("DragBlockGuaranteeABH", false)
+                            or not LocalQueryHitbox.Parent
+                            or not QueryHitbox.Parent then
+                            return
+                        end
+
+                        GuaranteePart.CFrame = QueryHitbox.CFrame * (DetectionOffset or CFrame.new(0, 0, -3.5))
+                        local Hitbox = workspace:GetPartsInPart(GuaranteePart, GuaranteeParams)
+                        if #Hitbox > 0 then
+                            local Blocked = false
+                            if FireSignal and BlockButton then
+                                local Success = pcall(function()
+                                    FireSignal(BlockButton.MouseButton1Click)
+                                end)
+                                Blocked = Success
+                            elseif GetValue("OfficialGame") and UseActorAbility then
+                                local Success = pcall(function()
+                                    UseActorAbility:FireServer("UseActorAbility", {"Block"})
+                                end)
+                                Blocked = Success
+                            elseif UseActorAbility then
+                                local Success = pcall(function()
+                                    UseActorAbility:FireServer("UseActorAbility", "Block")
+                                    UseActorAbility:FireServer("UseActorAbility", {"Block"})
+                                end)
+                                Blocked = Success
+                            end
+
+                            if Blocked and GetValue("DragBlock", false) and not IsHelplessActive() then
+                                DragBlockAttackingKiller(Killer, tonumber(GetValue("DragBlockGuaranteeMovement")) or 3)
+                            end
+                            return
+                        end
+                        task.wait(0.02)
+                    end
+                end
+
                 local function RunC00lkiddSoundAutoBlock()
                     if not GetValue("AutoBlock") or IsHelplessActive() then return end
                     if string.lower(Killer.Name or "") ~= "c00lkidd" then return end
@@ -2065,6 +2159,9 @@ local FeatureLoadout; FeatureLoadout = {
 
                     local CustomHitbox = CustomHitboxes["c00lkidd"]
                     local KillerNameLower = Killer.Name:lower()
+                    if ShouldRunDragBlockGuaranteeABH() then
+                        RunDragBlockGuaranteeABH(CustomHitbox and CustomHitbox["Offset"] or CFrame.new(0,0,-3.5))
+                    end
                     for i = 1, 12 do
                         if IsHelplessActive() or not GetValue("AutoBlock") then return end
                         SelfParams.FilterDescendantsInstances = {LocalCharacter:FindFirstChild("QueryHitbox")}
@@ -2223,7 +2320,12 @@ local FeatureLoadout; FeatureLoadout = {
                                 end
 
                                 if GetValue("AutoBlock") and LocalCharacter and LocalCharacter:FindFirstChild("QueryHitbox") and LocalCharacter.Parent == SurvivorsFolder and MainUI:FindFirstChild("AbilityContainer") and MainUI:FindFirstChild("AbilityContainer"):FindFirstChild("Block") then
+                                -- Run the separate guarantee ABH independently of the normal ABH.
+                                -- It only runs on every 4th attack event and only while Drag Block is enabled.
                                 local CustomHitbox = CustomHitboxes[AnimType:lower()] or CustomHitboxes[Killer.Name:lower()]
+                                if ShouldRunDragBlockGuaranteeABH() then
+                                    RunDragBlockGuaranteeABH(CustomHitbox and CustomHitbox["Offset"] or CFrame.new(0,0,-3.5))
+                                end
                                 for i = 1,12 do
                                     SelfParams.FilterDescendantsInstances = {LocalCharacter:FindFirstChild("QueryHitbox")}
                                     local Part = Instance.new("Part")
@@ -2417,36 +2519,48 @@ local FeatureLoadout; FeatureLoadout = {
                                 UseActorAbility:FireServer("UseActorAbility",{"Punch"})
                             end
                         end
-                        local CameraTarget 
-                        local SelectedVelocity
-                        -- Patch 173: restore the original Auto Punch look-at behavior.
-                        -- Auto Punch faces the killer's current position without prediction.
-                        local LookAtUntil = os.clock() + 0.4
-                        CameraTarget = RunService.RenderStepped:Connect(function()
-                            if os.clock() >= LookAtUntil then
-                                CameraTarget:Disconnect()
+                        local CameraTarget
+                        -- Patch 178: keep Auto Punch facing locked to the killer for the full 0.5s.
+                        -- Do not depend on PunchAbility still existing; the ability can end before the aim window.
+                        local LookAtUntil = os.clock() + 0.5
+                        local PreviousAutoRotate = LocalHumanoid.AutoRotate
+                        LocalHumanoid.AutoRotate = false
+                        LocalCharacter:SetAttribute("DisableShiftLockMovement",true)
+                        local function FaceClosestKiller()
+                            if not LocalRoot or not LocalRoot.Parent or not LocalHumanoid or LocalHumanoid.Health <= 0 then
                                 return
                             end
-                            local ClosestKiller,Dis = self:GetClosestKiller()
-                            if not ClosestKiller or not ClosestKiller:FindFirstChild("HumanoidRootPart") then return end
-                            local KillerRootPos = ClosestKiller:FindFirstChild("HumanoidRootPart").Position
-                            local SelectedPosition = Vector3.new(KillerRootPos.X,LocalRoot.Position.Y,KillerRootPos.Z)
-                            local TargetCFrame = CFrame.new(LocalRoot.Position, SelectedPosition)
-                            LocalCharacter:SetPrimaryPartCFrame(TargetCFrame)
-                            if not SelectedVelocity then
-                                LocalRoot.Velocity = TargetCFrame.LookVector * 32
-                                SelectedVelocity = LocalRoot.Velocity
-                            else
-                                SelectedVelocity = LocalRoot.Velocity:Lerp(SelectedVelocity or LocalRoot.Velocity,0.8)
-                                LocalRoot.Velocity = SelectedVelocity
+                            local ClosestKiller = self:GetClosestKiller()
+                            if not ClosestKiller then return end
+                            local KillerRoot = ClosestKiller:FindFirstChild("HumanoidRootPart")
+                            if not KillerRoot then return end
+                            local RootPosition = LocalRoot.Position
+                            local TargetPosition = Vector3.new(KillerRoot.Position.X, RootPosition.Y, KillerRoot.Position.Z)
+                            if (TargetPosition - RootPosition).Magnitude <= 0.05 then return end
+                            local TargetCFrame = CFrame.lookAt(RootPosition, TargetPosition)
+                            LocalRoot.CFrame = TargetCFrame
+                        end
+                        FaceClosestKiller()
+                        CameraTarget = RunService.RenderStepped:Connect(function()
+                            if os.clock() >= LookAtUntil or not LocalCharacter.Parent then
+                                if CameraTarget then
+                                    CameraTarget:Disconnect()
+                                    CameraTarget = nil
+                                end
+                                return
                             end
+                            FaceClosestKiller()
                         end)
                         repeat
-                            task.wait(0.1)
-                        until FOVMultipliers:FindFirstChild("HitRegistered") or not SpeedMultipliers:FindFirstChild("PunchAbility")
-                        CameraTarget:Disconnect()
-                        task.wait(0.2)
+                            task.wait(0.05)
+                        until os.clock() >= LookAtUntil or not LocalCharacter.Parent or not LocalHumanoid or LocalHumanoid.Health <= 0
+                        if CameraTarget then
+                            CameraTarget:Disconnect()
+                            CameraTarget = nil
+                        end
+                        LocalHumanoid.AutoRotate = PreviousAutoRotate
                         LocalCharacter:SetAttribute("DisableShiftLockMovement",false)
+                        task.wait(0.2)
                     end
                 end)
             end,
