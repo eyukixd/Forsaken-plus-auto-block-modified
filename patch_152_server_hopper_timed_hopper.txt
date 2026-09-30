@@ -109,6 +109,7 @@ local DragBlockBusy = false
 local DragBlockToken = 0
 local DragBlockFollowCooldownUntil = 0
 local FOLLOW_KILLER_COOLDOWN = 27
+local CancelDragBlockFollow = nil
 
 -- Exact Helpless detection from ReplicatedStorage.Modules.Schematics.StatusEffects.Helpless.
 -- The game's Applied handler sets Character.AbilitiesDisabled = true.
@@ -154,12 +155,12 @@ local function DragBlockAttackingKiller(Killer, MaxMovementDistance)
         local Delta = Vector3.new(KillerRoot.Position.X - Root.Position.X, 0, KillerRoot.Position.Z - Root.Position.Z)
         return Delta.Magnitude
     end
-    -- Do not consume the shared cooldown or disable controls when the player
-    -- is already inside the requested stop radius.
+    -- Start the shared cooldown on every valid follow trigger, even if the
+    -- player is already inside the stop radius and no movement is needed.
+    DragBlockFollowCooldownUntil = os.clock() + FOLLOW_KILLER_COOLDOWN
     if GetFlatDistance() <= STOP_DISTANCE then return end
 
     DragBlockBusy = true
-    DragBlockFollowCooldownUntil = os.clock() + FOLLOW_KILLER_COOLDOWN
     DragBlockToken += 1
     local Token = DragBlockToken
     local OriginalWalkSpeed = Humanoid.WalkSpeed
@@ -252,7 +253,11 @@ local function DragBlockAttackingKiller(Killer, MaxMovementDistance)
             end
         end)
         DragBlockBusy = false
+        if CancelDragBlockFollow == FinishDragBlock then
+            CancelDragBlockFollow = nil
+        end
     end
+    CancelDragBlockFollow = FinishDragBlock
 
     SmoothLookConnection = RunService.RenderStepped:Connect(function(DeltaTime)
         if not DragBlockBusy
@@ -354,6 +359,13 @@ local function DragBlockAttackingKiller(Killer, MaxMovementDistance)
         -- race and already stopped the follow.
         FinishDragBlock()
     end)
+end
+
+local function StopCurrentDragBlockFollow()
+    local CancelFollow = CancelDragBlockFollow
+    if CancelFollow then
+        CancelFollow()
+    end
 end
 
 
@@ -2195,9 +2207,12 @@ local FeatureLoadout; FeatureLoadout = {
                     Part.Material = Enum.Material.ForceField
                     Part.Transparency = ShowHitboxesSetting and ShowHitboxesSetting.Value and 0.1 or 1
                     Part.Parent = Hitboxes
-                    Debris:AddItem(Part, 0.4)
 
                     local Hitbox = workspace:GetPartsInPart(Part, SelfParams)
+                    -- This special hitbox is for exactly one overlap query on
+                    -- interval 4. Destroy it now; do not leave it visible over
+                    -- the remaining normal ABH intervals.
+                    Part:Destroy()
                     if #Hitbox > 0 then
                         if FireSignal and BlockButton then
                             FireSignal(BlockButton.MouseButton1Click)
@@ -2567,6 +2582,9 @@ local FeatureLoadout; FeatureLoadout = {
                 if not LocalHumanoid then return warn("no humanoid found") end
                 LocalCharacter:GetAttributeChangedSignal("TimesHit"):Connect(function()
                     if GetValue("AutoPunch") and SpeedMultipliers:FindFirstChild("GuestBlocking") and LocalHumanoid:GetAttribute("Overheal") ~= nil and LocalHumanoid:GetAttribute("Overheal") >= 10 and (self:GetClosestKiller()) then
+                        -- Auto Punch takes priority over dragging the player
+                        -- toward the killer. Stop follow before the Punch Wait.
+                        StopCurrentDragBlockFollow()
                         -- Patch 173: read the current Punch Wait slider directly each trigger.
                         local PunchWaitValue = PlusFolderSettings and PlusFolderSettings:FindFirstChild("PunchWait", true)
                         local PunchWait = math.clamp(tonumber(PunchWaitValue and PunchWaitValue.Value) or 0.15, 0, 1)
