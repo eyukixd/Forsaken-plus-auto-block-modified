@@ -1,3 +1,4 @@
+-- Patch 191: Restore loading from Patch 189 and isolate Drag Block V2 errors.
 -- Forsaken Plus Made by Naiko Scripts --
 -- Copies of this script must contain the original credits and be open source --
 
@@ -5,12 +6,28 @@ if workspace.DistributedGameTime < 4 then
 	task.wait(4 - workspace.DistributedGameTime)
 end
 
-if game.CoreGui:FindFirstChild("Plus") then
+local ExistingPlusMarker = game.CoreGui:FindFirstChild("Plus")
+local ExistingPlusScreen
+pcall(function()
+    local ExistingPlayer = game:GetService("Players").LocalPlayer
+    local ExistingPlayerGui = ExistingPlayer and ExistingPlayer:FindFirstChildOfClass("PlayerGui")
+    local ExistingMainUI = ExistingPlayerGui and ExistingPlayerGui:FindFirstChild("MainUI")
+    ExistingPlusScreen = ExistingMainUI and ExistingMainUI:FindFirstChild("PlusScreen")
+end)
+
+-- A failed startup can leave the old CoreGui marker behind.  Only treat the
+-- script as running when its actual PlusScreen was created; otherwise remove
+-- the stale marker so the repaired script can start on the next attempt.
+if ExistingPlusMarker and ExistingPlusScreen then
     return warn("Script already running")
-elseif game.GameId == 6331902150 or game.GameId == 7464167604 or workspace:GetAttribute("ServerType") then
-	Instance.new("BoolValue", game.CoreGui).Name = "Plus"
+elseif ExistingPlusMarker then
+    ExistingPlusMarker:Destroy()
+end
+
+if game.GameId == 6331902150 or game.GameId == 7464167604 or workspace:GetAttribute("ServerType") then
+    Instance.new("BoolValue", game.CoreGui).Name = "Plus"
 else
-	return warn("Incorrect game")
+    return warn("Incorrect game")
 end
 
 game:GetService("Players").LocalPlayer.Idled:Connect(function()
@@ -77,18 +94,20 @@ local UIScale = Instance.new("UIScale")
 IsUnderground,IsFixingGenerator,WarnedAboutFilesCompatability = false,false,false
 local AutoDoAllInvincibleToken = 0
 local IsAutoDoAllGeneratorsRunning = false
+local AutoDoAllPuzzleWasEnabled = nil
 OverriddenAnimations,AllAnimations,Values = {},{["Default Roblox"] = {["Idle"] = "http://www.roblox.com/asset/?id=180435571",["Walk"] = "http://www.roblox.com/asset/?id=180426354",["Run"] = "http://www.roblox.com/asset/?id=180426354"}},{}
 local ModulesOptions,LastTrack,NoliConfig,GetAnimationType,LastAnimOriginalUsed,UpdateAnim,CanPlayOverrideAnim,CurrentQTEAzure,TeleportSound,GetFunction
 ColorPresets = {["White"] = Color3.fromRGB(255,255,255),["Teal"] = Color3.fromRGB(3,252,157),["Green"] = Color3.fromRGB(0,255,0),["Purple"] = Color3.fromRGB(158, 0, 179),["Red"] = Color3.fromRGB(255,0,0),["Blue"] = Color3.fromRGB(0,0,255),["Cyan"] = Color3.fromRGB(0,255,255),["Gold"] = Color3.fromRGB(255,215,0),["Orange"] = Color3.fromRGB(255,165,0)}
 IgnoreKeybinds = {"W", "A", "S", "D"}
-GameVersionForScript = "2026-09-28"
+GameVersionForScript = "2026-09-29"
+-- Patch 194: force-stop Drag Block at the configured distance and make V2 the literal 4th existing ABH check.
 -- Physically walks toward the killer while Auto Block is active.
 -- All survivor movement inputs are blocked until the routine finishes.
 -- Drag Block and Drag Block V2 use the same shared cooldown,
 -- while each configuration keeps its own movement/stop slider.
 local DragBlockBusy = false
 local DragBlockToken = 0
-local DragBlockLastStart = 0
+local DragBlockFollowCooldownUntil = 0
 local FOLLOW_KILLER_COOLDOWN = 27
 
 -- Exact Helpless detection from ReplicatedStorage.Modules.Schematics.StatusEffects.Helpless.
@@ -100,10 +119,11 @@ local function IsHelplessActive()
     return LocalCharacter:GetAttribute("AbilitiesDisabled") == true
 end
 
+-- Both Drag Block and Drag Block V2 use the same Hold Player Duration slider.
+-- GuaranteeMovementDistance only controls how far V2 moves; it does not create a second duration slider.
 local function DragBlockAttackingKiller(Killer, GuaranteeMovementDistance)
     if DragBlockBusy or not GetValue("DragBlock", false) then return end
-    if IsHelplessActive() then return end
-    if os.clock() - DragBlockLastStart < FOLLOW_KILLER_COOLDOWN then return end
+    if os.clock() < DragBlockFollowCooldownUntil then return end
     if not Killer or not Killer.Parent then return end
 
     local Character = LocalCharacter
@@ -111,8 +131,6 @@ local function DragBlockAttackingKiller(Killer, GuaranteeMovementDistance)
     local Root = LocalRoot
     local KillerRoot = Killer:FindFirstChild("HumanoidRootPart")
     if not Character or not Humanoid or not Root or not KillerRoot then return end
-    if IsHelplessActive() then return end
-
     local PathfindingService = game:GetService("PathfindingService")
     local ContextActionService = game:GetService("ContextActionService")
     local Players = game:GetService("Players")
@@ -127,12 +145,10 @@ local function DragBlockAttackingKiller(Killer, GuaranteeMovementDistance)
     local HOLD_DURATION = tonumber(GetValue("DragBlockHoldDuration")) or 0.2
     local WALK_DISTANCE_ONCE = math.max(0.5, tonumber(GuaranteeMovementDistance) or 3)
     local MOVE_TIMEOUT = math.max(1.5, HOLD_DURATION + 1.0)
-
     DragBlockBusy = true
-    DragBlockLastStart = os.clock()
+    DragBlockFollowCooldownUntil = os.clock() + FOLLOW_KILLER_COOLDOWN
     DragBlockToken += 1
     local Token = DragBlockToken
-    local Started = os.clock()
     local OriginalWalkSpeed = Humanoid.WalkSpeed
     local OriginalJumpPower = Humanoid.JumpPower
     local OriginalJumpHeight = Humanoid.JumpHeight
@@ -191,16 +207,56 @@ local function DragBlockAttackingKiller(Killer, GuaranteeMovementDistance)
         end
     end
 
+    -- There must be one cleanup path for both the render loop and the
+    -- movement worker.  The render loop can reach the stop distance before
+    -- MoveToFinished fires, and the worker can finish for another reason.
+    local Finished = false
+    local function FinishDragBlock()
+        if Finished then return end
+        Finished = true
+        if Token == DragBlockToken then
+            DragBlockToken += 1
+        end
+        StopSmoothLook()
+        if Humanoid and Humanoid.Parent then
+            Humanoid:MoveTo(Root.Position)
+            Humanoid.WalkSpeed = OriginalWalkSpeed
+            Humanoid.JumpPower = OriginalJumpPower
+            Humanoid.JumpHeight = OriginalJumpHeight
+            Humanoid.AutoRotate = OriginalAutoRotate
+            Humanoid:Move(Vector3.zero, true)
+        end
+        pcall(function()
+            ContextActionService:UnbindAction(MovementActionName)
+        end)
+        pcall(function()
+            if PlayerControls then
+                PlayerControls:Enable()
+            end
+        end)
+        DragBlockBusy = false
+    end
+
     SmoothLookConnection = RunService.RenderStepped:Connect(function(DeltaTime)
         if not DragBlockBusy
             or Token ~= DragBlockToken
             or not GetValue("DragBlock", false)
-            or os.clock() - SmoothLookStarted >= SMOOTH_LOOK_DURATION
             or not Root
             or not Root.Parent
             or not KillerRoot
             or not KillerRoot.Parent then
-            StopSmoothLook()
+            FinishDragBlock()
+            return
+        end
+
+        -- Keep checking for the stop distance for the whole follow, not just
+        -- during the first 0.4 seconds of smooth rotation.
+        if (Root.Position - KillerRoot.Position).Magnitude <= STOP_DISTANCE then
+            FinishDragBlock()
+            return
+        end
+
+        if os.clock() - SmoothLookStarted >= SMOOTH_LOOK_DURATION then
             return
         end
 
@@ -218,11 +274,14 @@ local function DragBlockAttackingKiller(Killer, GuaranteeMovementDistance)
         local direction = KillerRoot.Position - Root.Position
         local distance = direction.Magnitude
 
-        if distance > 0.05 then
-            local stepDistance = math.min(WALK_DISTANCE_ONCE, distance)
-            local targetPosition = Root.Position + direction.Unit * stepDistance
-            Humanoid:MoveTo(targetPosition)
+        -- If the player is already at or inside the configured stop distance,
+        -- force-end Drag Block immediately instead of starting another MoveTo.
+        if distance <= STOP_DISTANCE then
+            FinishDragBlock()
+            return
+        end
 
+        if distance > 0.05 then
             local startedMove = os.clock()
             while DragBlockBusy
                 and Token == DragBlockToken
@@ -231,39 +290,22 @@ local function DragBlockAttackingKiller(Killer, GuaranteeMovementDistance)
                 and Killer.Parent
                 and KillerRoot.Parent
                 and os.clock() - startedMove < MOVE_TIMEOUT do
-                -- Keep the target current so the routine follows a moving killer instead of
-                -- trying to walk to a stale position from the instant the block fired.
                 local CurrentDirection = KillerRoot.Position - Root.Position
                 local CurrentDistance = CurrentDirection.Magnitude
-                if CurrentDistance > STOP_DISTANCE and CurrentDistance > 0.05 then
-                    local RemainingMovement = math.max(0, CurrentDistance - STOP_DISTANCE)
-                    local StepDistance = math.min(WALK_DISTANCE_ONCE, RemainingMovement)
-                    local CurrentTarget = Root.Position + CurrentDirection.Unit * StepDistance
-                    Humanoid:MoveTo(CurrentTarget)
+
+                -- Force-end as soon as the stop distance is reached.  This is
+                -- authoritative even if MoveTo has not reported completion.
+                if CurrentDistance <= STOP_DISTANCE then
+                    FinishDragBlock()
+                    return
                 end
-                -- Re-enable survivor controls as soon as the survivor reaches the killer-specific stop distance.
-                local currentKillerDistance = (Root.Position - KillerRoot.Position).Magnitude
-                if currentKillerDistance <= STOP_DISTANCE then
-                    -- Stop-after-3-studs: restore player inputs immediately.
-                    DragBlockToken += 1
-                    StopSmoothLook()
-                    if Humanoid and Humanoid.Parent then
-                        Humanoid:MoveTo(Root.Position)
-                        Humanoid.WalkSpeed = OriginalWalkSpeed
-                        Humanoid.JumpPower = OriginalJumpPower
-                        Humanoid.JumpHeight = OriginalJumpHeight
-                        Humanoid.AutoRotate = OriginalAutoRotate
-                        Humanoid:Move(Vector3.zero, true)
-                    end
-                    pcall(function()
-                        ContextActionService:UnbindAction(MovementActionName)
-                    end)
-                    pcall(function()
-                        if PlayerControls then
-                            PlayerControls:Enable()
-                        end
-                    end)
-                    DragBlockBusy = false
+
+                if CurrentDistance > STOP_DISTANCE and CurrentDistance > 0.05 then
+                    -- Aim MoveTo at a point exactly STOP_DISTANCE studs from the killer.
+                    local TargetPosition = KillerRoot.Position - CurrentDirection.Unit * STOP_DISTANCE
+                    Humanoid:MoveTo(TargetPosition)
+                else
+                    FinishDragBlock()
                     return
                 end
 
@@ -271,35 +313,10 @@ local function DragBlockAttackingKiller(Killer, GuaranteeMovementDistance)
             end
         end
 
-        if Token == DragBlockToken then
-            -- If Drag Block was disabled during movement, stop immediately
-            -- and restore the survivor's controls and movement properties.
-            if not GetValue("DragBlock", false) then
-                DragBlockToken += 1
-            end
-
-            StopSmoothLook()
-            if Humanoid and Humanoid.Parent then
-                Humanoid:MoveTo(Root.Position)
-                Humanoid.WalkSpeed = OriginalWalkSpeed
-                Humanoid.JumpPower = OriginalJumpPower
-                Humanoid.JumpHeight = OriginalJumpHeight
-                Humanoid.AutoRotate = OriginalAutoRotate
-                Humanoid:Move(Vector3.zero, true)
-            end
-
-            pcall(function()
-                ContextActionService:UnbindAction(MovementActionName)
-            end)
-
-            pcall(function()
-                if PlayerControls then
-                    PlayerControls:Enable()
-                end
-            end)
-
-            DragBlockBusy = false
-        end
+        -- This also handles the timeout, a disabled setting, or a destroyed
+        -- killer.  FinishDragBlock is idempotent if the render loop won the
+        -- race and already stopped the follow.
+        FinishDragBlock()
     end)
 end
 
@@ -318,11 +335,44 @@ local function IsLocalPlayerSpectating()
     return false
 end
 
+local function StopAutoDoAllInvincibility()
+    AutoDoAllInvincibleToken += 1
+    IsAutoDoAllGeneratorsRunning = false
+    workspace:SetAttribute("Invincible", nil)
+    local Invincible = GetValue("Invincible", true)
+    if Invincible then
+        Invincible.Value = false
+        pcall(function()
+            Invincible:GoUnder(false)
+        end)
+    end
+
+    local AutoPuzzle = GetValue("AutoGeneratorPuzzle", true)
+    if AutoDoAllPuzzleWasEnabled == false and AutoPuzzle then
+        AutoPuzzle.Value = false
+    end
+    AutoDoAllPuzzleWasEnabled = nil
+end
+
+local function EnableAutoDoAllPuzzleAssist()
+    local AutoPuzzle = GetValue("AutoGeneratorPuzzle", true)
+    if not AutoPuzzle then
+        return
+    end
+    if AutoDoAllPuzzleWasEnabled == nil then
+        AutoDoAllPuzzleWasEnabled = AutoPuzzle.Value == true
+    end
+    if not AutoPuzzle.Value then
+        AutoPuzzle.Value = true
+    end
+end
+
 -- Finds a clear interaction position around a generator.
 -- This prevents another survivor standing on the preferred side
 -- from blocking the normal generator interaction.
 local function GetClearGeneratorPosition(GeneratorMain)
-    if not GeneratorMain or not LocalRoot then
+    local Root = LocalRoot or (LocalCharacter and LocalCharacter:FindFirstChild("HumanoidRootPart"))
+    if not GeneratorMain or not Root then
         return nil
     end
 
@@ -340,6 +390,7 @@ local function GetClearGeneratorPosition(GeneratorMain)
     local RaycastParams = RaycastParams.new()
     RaycastParams.FilterType = Enum.RaycastFilterType.Exclude
     RaycastParams.FilterDescendantsInstances = {LocalCharacter, GeneratorMain.Parent}
+    local FallbackPosition = Positions[1]
 
     for _, Position in Positions do
         local Clear = true
@@ -390,7 +441,9 @@ local function GetClearGeneratorPosition(GeneratorMain)
         end
     end
 
-    return nil
+    -- A blocked test should not prevent the automation from trying the
+    -- generator. The prompt/interaction retry logic handles the fallback.
+    return FallbackPosition
 end
 
 local FeatureLoadout; FeatureLoadout = {
@@ -632,16 +685,14 @@ local FeatureLoadout; FeatureLoadout = {
                 end)
             end
         },
-        ["ResetAfterAllGenerators"] = {
-    DisplayDescription = "Resets the player after Auto Do All Generators finishes every unfinished generator",
-    DisplayTitle = "Reset After All Generators",
-    LayoutOrder = 2.5,
-    Savable = true,
-    Default = false,
-    BoolValue = true,
-    ScriptFunction = function(Value)
-        Value.Value = Value.Value == true
-    end,
+["ResetAfterAllGenerators"] = {
+    ["DisplayDescription"] = "Resets the player after Auto Do All Generators finishes every unfinished generator",
+    ["DisplayTitle"] = "Reset After All Generators",
+    ["LayoutOrder"] = 2.5,
+    ["Savable"] = true,
+    ["InstanceType"] = "BoolValue",
+    ["DefaultInstanceValue"] = false,
+    ["Requirement"] = "AutoDoAllGenerators"
 },
 ["AutoDoAllGenerators"] = {
             ["DisplayDescription"] = "Teleports to each unfinished generator and automatically completes it",
@@ -654,25 +705,20 @@ local FeatureLoadout; FeatureLoadout = {
                 AutoDoAllInvincibleToken += 1
                 local Token = AutoDoAllInvincibleToken
 
+                if not Value then
+                    StopAutoDoAllInvincibility()
+                    return
+                end
+
                 if IsLocalPlayerSpectating() then
                     return
                 end
 
-                if Value
-                    and not IsLocalPlayerSpectating()
-                    and GetValue("AutoDoAllGenerators")
-                    and GetValue("Invincible", true) then
-                    GetValue("Invincible", true).Value = true
+                EnableAutoDoAllPuzzleAssist()
+                local Invincible = GetValue("Invincible", true)
+                if Invincible and not Invincible.Value then
+                    Invincible.Value = true
                 end
-		-- Reset after all generators are completed when the toggle is enabled.
-		if IsAutoDoAllGeneratorsRunning
-			and GetValue("AutoDoAllGenerators", false).Value
-			and GetValue("ResetAfterAllGenerators", false).Value then
-			local Humanoid = LocalCharacter and LocalCharacter:FindFirstChildOfClass("Humanoid")
-			if Humanoid and Humanoid.Health > 0 then
-				Humanoid.Health = 0
-			end
-		end
             end,
             ["OnLoop"] = function(self)
                 if IsLocalPlayerSpectating() then
@@ -690,31 +736,34 @@ local FeatureLoadout; FeatureLoadout = {
                     return
                 end
 
+                EnableAutoDoAllPuzzleAssist()
                 IsAutoDoAllGeneratorsRunning = true
 
                 task.spawn(function()
-                    if IsLocalPlayerSpectating()
-                        or not GetValue("AutoDoAllGenerators")
-                        or not GameMap
-                        or not LocalCharacter then
+                    local function IsActive()
+                        return Token == AutoDoAllInvincibleToken
+                            and GetValue("AutoDoAllGenerators") == true
+                            and not IsLocalPlayerSpectating()
+                            and GameMap
+                            and LocalCharacter
+                    end
+
+                    if not IsActive() then
                         IsAutoDoAllGeneratorsRunning = false
                         return
                     end
 
                     for _, Object in GameMap:QueryDescendants("Model#Generator:has(#Main)") do
-                        if IsLocalPlayerSpectating()
-                            or not GetValue("AutoDoAllGenerators")
-                            or not LocalCharacter then
+                        if not IsActive() then
                             break
                         end
 
                         local Main = Object:FindFirstChild("Main")
                         local ProgressValue = Object:FindFirstChild("Progress")
                         local Remotes = Object:FindFirstChild("Remotes")
-                        local ProgressRemoteFolder = Remotes and Object:FindFirstChild("Progress")
-                        local RemoteEvent = ProgressRemoteFolder and Remotes:FindFirstChildOfClass("RemoteEvent")
+                        local RemoteEvent = Remotes and (Remotes:FindFirstChild("Progress") or Remotes:FindFirstChildOfClass("RemoteEvent"))
 
-                        if Main and ProgressValue and ProgressValue.Value < 100 and RemoteEvent then
+                        if Main and ProgressValue and ProgressValue.Value < 100 then
                             local TargetPosition = GetClearGeneratorPosition(Main)
 
                             if TargetPosition and LocalCharacter.PivotTo then
@@ -749,7 +798,7 @@ local FeatureLoadout; FeatureLoadout = {
                         end
 
                         local function TryOpenFromPosition(Position)
-                            if IsLocalPlayerSpectating() or not Position or not LocalCharacter then
+                            if not IsActive() or not Position or not LocalCharacter then
                                 return false
                             end
 
@@ -777,8 +826,7 @@ local FeatureLoadout; FeatureLoadout = {
                             local BeforeProgress = ProgressValue.Value
 
                             for _ = 1, 3 do
-                                if IsLocalPlayerSpectating()
-                                    or not GetValue("AutoDoAllGenerators")
+                                if not IsActive()
                                     or not LocalCharacter
                                     or not ProgressValue.Parent then
                                     return false
@@ -794,10 +842,20 @@ local FeatureLoadout; FeatureLoadout = {
                                     GeneratorPrompt:InputHoldBegin()
                                 end)
 
+                                -- Complete the generator directly as well as
+                                -- opening its prompt. This keeps Do All
+                                -- independent from Auto Generator(s).
+                                if RemoteEvent and RemoteEvent:IsA("RemoteEvent") then
+                                    pcall(function()
+                                        RemoteEvent:FireServer()
+                                    end)
+                                end
+
                                 -- Give the generator up to 3 seconds to actually respond.
                                 local WaitStart = os.clock()
+                                local LastRemoteFire = os.clock()
                                 while os.clock() - WaitStart < 3 do
-                                    if not GetValue("AutoDoAllGenerators")
+                                    if not IsActive()
                                         or not LocalCharacter
                                         or not ProgressValue.Parent then
                                         pcall(function()
@@ -811,6 +869,15 @@ local FeatureLoadout; FeatureLoadout = {
                                             GeneratorPrompt:InputHoldEnd()
                                         end)
                                         return true
+                                    end
+
+                                    if RemoteEvent
+                                        and RemoteEvent:IsA("RemoteEvent")
+                                        and os.clock() - LastRemoteFire >= 0.15 then
+                                        LastRemoteFire = os.clock()
+                                        pcall(function()
+                                            RemoteEvent:FireServer()
+                                        end)
                                     end
 
                                     task.wait(0.05)
@@ -872,19 +939,26 @@ local FeatureLoadout; FeatureLoadout = {
                         end
                     end
 
-                    -- Auto Do All Generators only teleports to and opens the
-                    -- generator. The existing Auto Generator(s) feature handles
-                    -- the actual puzzle/completion.
-                    while GetValue("AutoDoAllGenerators")
+                    -- Keep the existing Auto Generator(s) solver alive long
+                    -- enough to finish the puzzle opened above.
+                    local CompletionDeadline = os.clock() + 8
+                    while IsActive()
                         and HasClearPosition
                         and LocalCharacter
                         and ProgressValue.Parent
-                        and ProgressValue.Value < 100 do
+                        and ProgressValue.Value < 100
+                        and os.clock() < CompletionDeadline do
 
                         if IsLocalPlayerSpectating() then
                             break
                         end
 
+                        if RemoteEvent
+                            and RemoteEvent:IsA("RemoteEvent") then
+                            pcall(function()
+                                RemoteEvent:FireServer()
+                            end)
+                        end
                         task.wait(0.1)
                     end
 
@@ -895,10 +969,18 @@ local FeatureLoadout; FeatureLoadout = {
                             end
                         end
 
-                        task.wait(1)
+                        task.wait(math.max(0.1, tonumber(GetValue("AutoDoAllGeneratorInterval")) or 1.5))
                     end
 
-                    IsAutoDoAllGeneratorsRunning = false
+                    if Token == AutoDoAllInvincibleToken then
+                        IsAutoDoAllGeneratorsRunning = false
+                        if GetValue("ResetAfterAllGenerators") then
+                            local Humanoid = LocalCharacter and LocalCharacter:FindFirstChildOfClass("Humanoid")
+                            if Humanoid and Humanoid.Health > 0 then
+                                Humanoid.Health = 0
+                            end
+                        end
+                    end
                 end)
             end
         },
@@ -2042,11 +2124,73 @@ local FeatureLoadout; FeatureLoadout = {
                     return tostring(Sound.SoundId or ""):match("%d+")
                 end
 
-                -- Drag Block V2: the literal 4th check of each normal ABH cycle.
-                -- It is not displaced; it keeps the normal attack offset.
-                -- Side-to-side = 6 studs, front-to-back = 7 studs.
+                -- Drag Block V2 is a separate ABH interval runner.  It does
+                -- not resize or reposition any of the normal ABH hitboxes.
                 local DRAG_BLOCK_V2_CHECK = 4
-                local DRAG_BLOCK_V2_SIZE = Vector3.new(6, 6, 7)
+                local DRAG_BLOCK_V2_SIDE = 6
+                local DRAG_BLOCK_V2_FRONT = 7
+
+                local function RunDragBlockV2IntervalCheck(NormalHitboxSize, NormalHitboxCFrame)
+                    if not GetValue("DragBlockGuaranteeABH", false) then return end
+                    if not GetValue("AutoBlock") or IsHelplessActive() then return end
+                    if not LocalCharacter or LocalCharacter.Parent ~= SurvivorsFolder then return end
+                    if not QueryHitbox or not QueryHitbox.Parent then return end
+
+                    local AbilityContainer = MainUI and MainUI:FindFirstChild("AbilityContainer")
+                    local BlockButton = AbilityContainer and AbilityContainer:FindFirstChild("Block")
+                    if not BlockButton then return end
+
+                    -- Count V2's own interval checks.  The fourth count is
+                    -- exactly one 6x7 check for this ABH trigger.
+                    local V2IntervalChecks = 0
+                    for IntervalCheck = 1, DRAG_BLOCK_V2_CHECK do
+                        if not GetValue("DragBlockGuaranteeABH", false)
+                            or not GetValue("AutoBlock")
+                            or IsHelplessActive()
+                            or not QueryHitbox.Parent then
+                            return
+                        end
+                        V2IntervalChecks += 1
+                        if V2IntervalChecks < DRAG_BLOCK_V2_CHECK then
+                            task.wait(0.02)
+                        end
+                    end
+
+                    SelfParams.FilterDescendantsInstances = {LocalCharacter:FindFirstChild("QueryHitbox")}
+                    local Part = Instance.new("Part")
+                    Part.Name = "KillerDetectHitboxV2"
+                    Part.Color = BrickColor.new("Really black").Color
+                    local V2Size = NormalHitboxSize * 1.25
+                    Part.Size = Vector3.new(
+                        math.max(DRAG_BLOCK_V2_SIDE, V2Size.X),
+                        math.max(0.1, V2Size.Y),
+                        math.max(DRAG_BLOCK_V2_FRONT, V2Size.Z)
+                    )
+                    Part.CFrame = NormalHitboxCFrame
+                    Part.CanCollide = false
+                    Part.Anchored = true
+                    Part.CastShadow = false
+                    Part.Material = Enum.Material.ForceField
+                    Part.Transparency = ShowHitboxesSetting.Value and 0.1 or 1
+                    Part.Parent = Hitboxes
+                    Debris:AddItem(Part, 0.4)
+
+                    local Hitbox = workspace:GetPartsInPart(Part, SelfParams)
+                    if #Hitbox > 0 then
+                        if FireSignal and BlockButton then
+                            FireSignal(BlockButton.MouseButton1Click)
+                        elseif GetValue("OfficialGame") and UseActorAbility then
+                            UseActorAbility:FireServer("UseActorAbility", {"Block"})
+                        elseif UseActorAbility then
+                            UseActorAbility:FireServer("UseActorAbility", "Block")
+                            UseActorAbility:FireServer("UseActorAbility", {"Block"})
+                        end
+                        if GetValue("DragBlock", false) and not IsHelplessActive() then
+                            local FollowDistance = GetValue("DragBlockGuaranteeMovement")
+                            DragBlockAttackingKiller(Killer, FollowDistance)
+                        end
+                    end
+                end
 
                 local function RunC00lkiddSoundAutoBlock()
                     if not GetValue("AutoBlock") or IsHelplessActive() then return end
@@ -2066,31 +2210,21 @@ local FeatureLoadout; FeatureLoadout = {
                         Part.Color = BrickColor.new("Really black").Color
 
                         local BaseHitboxSize = (CustomHitbox and CustomHitbox["Size"] or Vector3.new(5.2, 6, 5.65)) * 2.2
-                        local IsDragBlockV2Check = GetValue("DragBlockGuaranteeABH", false) and i == DRAG_BLOCK_V2_CHECK
-                        if IsDragBlockV2Check then
-                            -- Literal 4th ABH check: 6 studs side-to-side and 7 studs front-to-back.
-                            BaseHitboxSize = DRAG_BLOCK_V2_SIZE
-                        end
                         local GlobalHitboxAdjustment = GetCurrentHitboxAdjustment("AutoBlockHitboxAllKiller")
                         local IndividualHitboxAdjustment = GetCurrentHitboxAdjustment("AutoBlockHitboxC00lkidd")
                         local TotalHitboxAdjustment = GlobalHitboxAdjustment + IndividualHitboxAdjustment
-                        if IsDragBlockV2Check then
-                            Part.Size = DRAG_BLOCK_V2_SIZE
-                        else
-                            Part.Size = BaseHitboxSize + Vector3.new(TotalHitboxAdjustment, TotalHitboxAdjustment, TotalHitboxAdjustment)
-                        end
+                        Part.Size = BaseHitboxSize + Vector3.new(TotalHitboxAdjustment, TotalHitboxAdjustment, TotalHitboxAdjustment)
                         Part.Size = Vector3.new(math.max(0.1, Part.Size.X), math.max(0.1, Part.Size.Y), math.max(0.1, Part.Size.Z))
 
                         local DetectionOffset = CustomHitbox and CustomHitbox["Offset"] or CFrame.new(0,0,-3.5)
-                        if GetValue("DragBlock", false) and not IsDragBlockV2Check then
+                        if GetValue("DragBlock", false) then
                             Part.Size = Part.Size + Vector3.new(0,0,2)
                             Part.CFrame = QueryHitbox.CFrame * DetectionOffset * CFrame.new(0,0,-1)
                         else
-                            -- Drag Block V2 does not displace the hitbox.
                             Part.CFrame = QueryHitbox.CFrame * DetectionOffset
                         end
 
-                        if KillerNameLower == "c00lkidd" and not IsDragBlockV2Check then
+                        if KillerNameLower == "c00lkidd" then
                             -- Reduce only the forward reach by 2 studs while keeping the rear edge fixed.
                             Part.Size = Vector3.new(
                                 math.max(0.1, Part.Size.X),
@@ -2105,6 +2239,10 @@ local FeatureLoadout; FeatureLoadout = {
                         Part.CastShadow = false
                         Part.Material = Enum.Material.ForceField
                         Part.Transparency = ShowHitboxesSetting.Value and 0.1 or 1
+
+                        if i == 1 then
+                            task.spawn(RunDragBlockV2IntervalCheck, Part.Size, Part.CFrame)
+                        end
                         Part.Parent = Hitboxes
                         Debris:AddItem(Part, 0.4)
 
@@ -2119,7 +2257,8 @@ local FeatureLoadout; FeatureLoadout = {
                                 UseActorAbility:FireServer("UseActorAbility", {"Block"})
                             end
                             if GetValue("DragBlock", false) and not IsHelplessActive() then
-                                DragBlockAttackingKiller(Killer)
+                                local FollowDistance = GetValue("DragBlockGuaranteeABH", false) and GetValue("DragBlockGuaranteeMovement") or nil
+                                DragBlockAttackingKiller(Killer, FollowDistance)
                             end
                             break
                         end
@@ -2233,11 +2372,6 @@ local FeatureLoadout; FeatureLoadout = {
                                     Part.Name = "KillerDetectHitbox"
                                     Part.Color = BrickColor.new("Really black").Color
                                     local BaseHitboxSize = (CustomHitbox and CustomHitbox["Size"] or Vector3.new(5.2, 6, 5.65)) * 2.2
-                                    local IsDragBlockV2Check = GetValue("DragBlockGuaranteeABH", false) and i == DRAG_BLOCK_V2_CHECK
-                                    if IsDragBlockV2Check then
-                                        -- Literal 4th ABH check: 6 studs side-to-side and 7 studs front-to-back.
-                                        BaseHitboxSize = DRAG_BLOCK_V2_SIZE
-                                    end
                                     local GlobalHitboxAdjustment = GetCurrentHitboxAdjustment("AutoBlockHitboxAllKiller")
                                     local KillerNameLower = Killer.Name:lower()
                                     local KillerHitboxKeys = {
@@ -2256,27 +2390,22 @@ local FeatureLoadout; FeatureLoadout = {
                                     end
                                     local IndividualHitboxAdjustment = GetCurrentHitboxAdjustment(KillerHitboxKey)
                                     local TotalHitboxAdjustment = GlobalHitboxAdjustment + IndividualHitboxAdjustment
-                                    if IsDragBlockV2Check then
-                                        Part.Size = DRAG_BLOCK_V2_SIZE
-                                    else
-                                        Part.Size = BaseHitboxSize + Vector3.new(TotalHitboxAdjustment, TotalHitboxAdjustment, TotalHitboxAdjustment)
-                                    end
+                                    Part.Size = BaseHitboxSize + Vector3.new(TotalHitboxAdjustment, TotalHitboxAdjustment, TotalHitboxAdjustment)
                                     Part.Size = Vector3.new(
                                         math.max(0.1, Part.Size.X),
                                         math.max(0.1, Part.Size.Y),
                                         math.max(0.1, Part.Size.Z)
                                     )
                                     local DetectionOffset = CustomHitbox and CustomHitbox["Offset"] or CFrame.new(0,0,-3.5)
-                                    if GetValue("DragBlock", false) and not IsDragBlockV2Check then
+                                    if GetValue("DragBlock", false) then
                                         -- Make the detection hitbox 2 studs deeper toward the killer/front.
                                         -- The rear edge stays in the same place; this changes the hitbox size, not just its offset.
                                         Part.Size = Part.Size + Vector3.new(0,0,2)
                                         Part.CFrame = QueryHitbox.CFrame * DetectionOffset * CFrame.new(0,0,-1)
                                     else
-                                        -- Drag Block V2 does not displace the hitbox.
                                         Part.CFrame = QueryHitbox.CFrame * DetectionOffset
                                     end
-                                    if KillerNameLower == "c00lkidd" and not IsDragBlockV2Check then
+                                    if KillerNameLower == "c00lkidd" then
                                         -- Reduce only the forward reach by 2 studs while keeping the rear edge fixed.
                                         Part.Size = Vector3.new(
                                             math.max(0.1, Part.Size.X),
@@ -2290,6 +2419,10 @@ local FeatureLoadout; FeatureLoadout = {
                                     Part.CastShadow = false
                                     Part.Material = Enum.Material.ForceField
                                     Part.Transparency = ShowHitboxesSetting.Value and 0.1 or 1
+
+                                    if i == 1 then
+                                        task.spawn(RunDragBlockV2IntervalCheck, Part.Size, Part.CFrame)
+                                    end
                                     Part.Parent = Hitboxes
                                     Debris:AddItem(Part,0.4)
                                     local Hitbox = workspace:GetPartsInPart(Part,SelfParams)
@@ -2297,7 +2430,8 @@ local FeatureLoadout; FeatureLoadout = {
                                         if FireSignal and MainUI:FindFirstChild("AbilityContainer"):FindFirstChild("Block") then
                                             FireSignal(MainUI.AbilityContainer.Block.MouseButton1Click)
                                             if GetValue("DragBlock", false) then
-                                                DragBlockAttackingKiller(Killer)
+                                                local FollowDistance = GetValue("DragBlockGuaranteeABH", false) and GetValue("DragBlockGuaranteeMovement") or nil
+                                                DragBlockAttackingKiller(Killer, FollowDistance)
                                             end
                                             break
                                         end
@@ -2308,7 +2442,8 @@ local FeatureLoadout; FeatureLoadout = {
                                             UseActorAbility:FireServer("UseActorAbility",{"Block"})
                                         end
                                         if GetValue("DragBlock", false) then
-                                            DragBlockAttackingKiller(Killer)
+                                            local FollowDistance = GetValue("DragBlockGuaranteeABH", false) and GetValue("DragBlockGuaranteeMovement") or nil
+                                            DragBlockAttackingKiller(Killer, FollowDistance)
                                         end
                                         break
                                     end
@@ -2510,7 +2645,7 @@ local FeatureLoadout; FeatureLoadout = {
             }
         },
         ["DragBlockHoldDuration"] = {
-            ["DisplayDescription"] = "How long Drag Block holds the player toward the killer (seconds)",
+            ["DisplayDescription"] = "How long Drag Block and Drag Block V2 hold/move the player toward the killer (seconds)",
             ["DisplayTitle"] = "Hold Player Duration",
             ["LayoutOrder"] = 16.2,
             ["Savable"] = true,
@@ -4112,15 +4247,11 @@ end
 function GetCurrentHitboxAdjustment(FeatureName)
     local CurrentInstance = PlusFolderSettings and PlusFolderSettings:FindFirstChild(FeatureName, true)
     if CurrentInstance and CurrentInstance:IsA("NumberValue") then
-        Values[FeatureName] = CurrentInstance
         return tonumber(CurrentInstance.Value) or 0
     end
 
-    local CachedInstance = Values[FeatureName]
-    if CachedInstance and CachedInstance:IsA("NumberValue") then
-        return tonumber(CachedInstance.Value) or 0
-    end
-
+    -- Never fall back to Values[] here: a replaced slider instance must not
+    -- leave an old individual-killer ABH adjustment active.
     return 0
 end
 
@@ -5505,6 +5636,9 @@ local function HandleUIFeatures(TabName,TabContents)
     for SettingName, SettingData in TabContents do
         task.spawn(function()
             if SettingName == "TabAttributes" then
+                return
+            end
+            if type(SettingData) ~= "table" or type(SettingData.InstanceType) ~= "string" then
                 return
             end
             local NewInstance = Instance.new(SettingData.InstanceType)
