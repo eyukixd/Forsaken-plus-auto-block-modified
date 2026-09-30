@@ -119,9 +119,9 @@ local function IsHelplessActive()
     return LocalCharacter:GetAttribute("AbilitiesDisabled") == true
 end
 
--- Both Drag Block and Drag Block V2 use the same Hold Player Duration slider.
--- GuaranteeMovementDistance only controls how far V2 moves; it does not create a second duration slider.
-local function DragBlockAttackingKiller(Killer, GuaranteeMovementDistance)
+-- Both Drag Block modes share the same mover/cooldown and Hold Player Duration.
+-- The optional V2 distance is a movement cap, not a stop-distance threshold.
+local function DragBlockAttackingKiller(Killer, MaxMovementDistance)
     if DragBlockBusy or not GetValue("DragBlock", false) then return end
     if os.clock() < DragBlockFollowCooldownUntil then return end
     if not Killer or not Killer.Parent then return end
@@ -131,20 +131,33 @@ local function DragBlockAttackingKiller(Killer, GuaranteeMovementDistance)
     local Root = LocalRoot
     local KillerRoot = Killer:FindFirstChild("HumanoidRootPart")
     if not Character or not Humanoid or not Root or not KillerRoot then return end
-    local PathfindingService = game:GetService("PathfindingService")
     local ContextActionService = game:GetService("ContextActionService")
     local Players = game:GetService("Players")
     local MovementActionName = "AutoBlockFollowMovementOverride"
-    -- C00lkidd stops 2 studs away; every other killer keeps the 3-stud distance.
+    -- Both modes use the regular stop-distance setting.
     local KillerNameLower = string.lower(Killer.Name or "")
-    -- Normal Drag Block uses DragBlockStopDistance.
-    -- Drag Block V2 uses its separate DragBlockGuaranteeMovement value.
-    local STOP_DISTANCE = tonumber(GuaranteeMovementDistance) or tonumber(GetValue("DragBlockStopDistance")) or (KillerNameLower:find("c00lkidd", 1, true) and 2 or 3)
+    local STOP_DISTANCE = tonumber(GetValue("DragBlockStopDistance")) or (KillerNameLower:find("c00lkidd", 1, true) and 2 or 3)
+    local MAX_MOVEMENT_DISTANCE = tonumber(MaxMovementDistance)
+    if MAX_MOVEMENT_DISTANCE then
+        MAX_MOVEMENT_DISTANCE = math.max(0.5, MAX_MOVEMENT_DISTANCE)
+    end
     -- Give MoveTo enough time to actually reach the configured target.
     -- The old 0.2s timeout could end the routine before any meaningful movement occurred.
     local HOLD_DURATION = tonumber(GetValue("DragBlockHoldDuration")) or 0.2
-    local WALK_DISTANCE_ONCE = math.max(0.5, tonumber(GuaranteeMovementDistance) or 3)
     local MOVE_TIMEOUT = math.max(1.5, HOLD_DURATION + 1.0)
+    local StartFlatPosition = Vector3.new(Root.Position.X, 0, Root.Position.Z)
+
+    local function GetFlatDistance()
+        if not Root or not Root.Parent or not KillerRoot or not KillerRoot.Parent then
+            return math.huge
+        end
+        local Delta = Vector3.new(KillerRoot.Position.X - Root.Position.X, 0, KillerRoot.Position.Z - Root.Position.Z)
+        return Delta.Magnitude
+    end
+    -- Do not consume the shared cooldown or disable controls when the player
+    -- is already inside the requested stop radius.
+    if GetFlatDistance() <= STOP_DISTANCE then return end
+
     DragBlockBusy = true
     DragBlockFollowCooldownUntil = os.clock() + FOLLOW_KILLER_COOLDOWN
     DragBlockToken += 1
@@ -219,7 +232,11 @@ local function DragBlockAttackingKiller(Killer, GuaranteeMovementDistance)
         end
         StopSmoothLook()
         if Humanoid and Humanoid.Parent then
-            Humanoid:MoveTo(Root.Position)
+            pcall(function()
+                if Root and Root.Parent then
+                    Humanoid:MoveTo(Root.Position)
+                end
+            end)
             Humanoid.WalkSpeed = OriginalWalkSpeed
             Humanoid.JumpPower = OriginalJumpPower
             Humanoid.JumpHeight = OriginalJumpHeight
@@ -244,14 +261,20 @@ local function DragBlockAttackingKiller(Killer, GuaranteeMovementDistance)
             or not Root
             or not Root.Parent
             or not KillerRoot
-            or not KillerRoot.Parent then
+            or not KillerRoot.Parent
+            or IsHelplessActive() then
             FinishDragBlock()
             return
         end
 
         -- Keep checking for the stop distance for the whole follow, not just
         -- during the first 0.4 seconds of smooth rotation.
-        if (Root.Position - KillerRoot.Position).Magnitude <= STOP_DISTANCE then
+        if GetFlatDistance() <= STOP_DISTANCE then
+            FinishDragBlock()
+            return
+        end
+        if MAX_MOVEMENT_DISTANCE
+            and (Vector3.new(Root.Position.X, 0, Root.Position.Z) - StartFlatPosition).Magnitude >= MAX_MOVEMENT_DISTANCE then
             FinishDragBlock()
             return
         end
@@ -271,26 +294,28 @@ local function DragBlockAttackingKiller(Killer, GuaranteeMovementDistance)
 
     task.spawn(function()
         -- Walk toward the killer, stopping at the killer-specific distance.
-        local direction = KillerRoot.Position - Root.Position
+        local direction = Vector3.new(KillerRoot.Position.X - Root.Position.X, 0, KillerRoot.Position.Z - Root.Position.Z)
         local distance = direction.Magnitude
 
-        -- If the player is already at or inside the configured stop distance,
-        -- force-end Drag Block immediately instead of starting another MoveTo.
+        -- Use horizontal distance: different rig/root heights must not prevent
+        -- the follow from stopping at the configured ground distance.
         if distance <= STOP_DISTANCE then
             FinishDragBlock()
             return
         end
+        local TargetDistance = MAX_MOVEMENT_DISTANCE and math.max(STOP_DISTANCE, distance - MAX_MOVEMENT_DISTANCE) or STOP_DISTANCE
 
         if distance > 0.05 then
             local startedMove = os.clock()
             while DragBlockBusy
                 and Token == DragBlockToken
                 and GetValue("DragBlock", false)
+                and not IsHelplessActive()
                 and Humanoid.Health > 0
                 and Killer.Parent
                 and KillerRoot.Parent
                 and os.clock() - startedMove < MOVE_TIMEOUT do
-                local CurrentDirection = KillerRoot.Position - Root.Position
+                local CurrentDirection = Vector3.new(KillerRoot.Position.X - Root.Position.X, 0, KillerRoot.Position.Z - Root.Position.Z)
                 local CurrentDistance = CurrentDirection.Magnitude
 
                 -- Force-end as soon as the stop distance is reached.  This is
@@ -299,17 +324,28 @@ local function DragBlockAttackingKiller(Killer, GuaranteeMovementDistance)
                     FinishDragBlock()
                     return
                 end
+                if MAX_MOVEMENT_DISTANCE
+                    and (Vector3.new(Root.Position.X, 0, Root.Position.Z) - StartFlatPosition).Magnitude >= MAX_MOVEMENT_DISTANCE then
+                    FinishDragBlock()
+                    return
+                end
 
-                if CurrentDistance > STOP_DISTANCE and CurrentDistance > 0.05 then
-                    -- Aim MoveTo at a point exactly STOP_DISTANCE studs from the killer.
-                    local TargetPosition = KillerRoot.Position - CurrentDirection.Unit * STOP_DISTANCE
+                if CurrentDistance > TargetDistance and CurrentDistance > 0.05 then
+                    -- Aim at a point on the player's current ground plane.
+                    -- V2 stops after its movement budget; normal Drag Block
+                    -- continues until the shared stop-distance is reached.
+                    local TargetPosition = Vector3.new(
+                        KillerRoot.Position.X - CurrentDirection.Unit.X * TargetDistance,
+                        Root.Position.Y,
+                        KillerRoot.Position.Z - CurrentDirection.Unit.Z * TargetDistance
+                    )
                     Humanoid:MoveTo(TargetPosition)
                 else
                     FinishDragBlock()
                     return
                 end
 
-                task.wait(0.03)
+                task.wait(0.08)
             end
         end
 
@@ -2124,39 +2160,25 @@ local FeatureLoadout; FeatureLoadout = {
                     return tostring(Sound.SoundId or ""):match("%d+")
                 end
 
-                -- Drag Block V2 is a separate ABH interval runner.  It does
-                -- not resize or reposition any of the normal ABH hitboxes.
+                -- Drag Block V2 is one additional check on ABH interval 4.
+                -- It never resizes or repositions a normal ABH hitbox.
                 local DRAG_BLOCK_V2_CHECK = 4
                 local DRAG_BLOCK_V2_SIDE = 6
                 local DRAG_BLOCK_V2_FRONT = 7
 
-                local function RunDragBlockV2IntervalCheck(NormalHitboxSize, NormalHitboxCFrame)
+                local function RunDragBlockV2Check(NormalHitboxSize, NormalHitboxCFrame)
                     if not GetValue("DragBlockGuaranteeABH", false) then return end
                     if not GetValue("AutoBlock") or IsHelplessActive() then return end
                     if not LocalCharacter or LocalCharacter.Parent ~= SurvivorsFolder then return end
                     if not QueryHitbox or not QueryHitbox.Parent then return end
+                    local LocalQueryHitbox = LocalCharacter:FindFirstChild("QueryHitbox")
+                    if not LocalQueryHitbox then return end
 
                     local AbilityContainer = MainUI and MainUI:FindFirstChild("AbilityContainer")
                     local BlockButton = AbilityContainer and AbilityContainer:FindFirstChild("Block")
                     if not BlockButton then return end
 
-                    -- Count V2's own interval checks.  The fourth count is
-                    -- exactly one 6x7 check for this ABH trigger.
-                    local V2IntervalChecks = 0
-                    for IntervalCheck = 1, DRAG_BLOCK_V2_CHECK do
-                        if not GetValue("DragBlockGuaranteeABH", false)
-                            or not GetValue("AutoBlock")
-                            or IsHelplessActive()
-                            or not QueryHitbox.Parent then
-                            return
-                        end
-                        V2IntervalChecks += 1
-                        if V2IntervalChecks < DRAG_BLOCK_V2_CHECK then
-                            task.wait(0.02)
-                        end
-                    end
-
-                    SelfParams.FilterDescendantsInstances = {LocalCharacter:FindFirstChild("QueryHitbox")}
+                    SelfParams.FilterDescendantsInstances = {LocalQueryHitbox}
                     local Part = Instance.new("Part")
                     Part.Name = "KillerDetectHitboxV2"
                     Part.Color = BrickColor.new("Really black").Color
@@ -2171,7 +2193,7 @@ local FeatureLoadout; FeatureLoadout = {
                     Part.Anchored = true
                     Part.CastShadow = false
                     Part.Material = Enum.Material.ForceField
-                    Part.Transparency = ShowHitboxesSetting.Value and 0.1 or 1
+                    Part.Transparency = ShowHitboxesSetting and ShowHitboxesSetting.Value and 0.1 or 1
                     Part.Parent = Hitboxes
                     Debris:AddItem(Part, 0.4)
 
@@ -2240,9 +2262,6 @@ local FeatureLoadout; FeatureLoadout = {
                         Part.Material = Enum.Material.ForceField
                         Part.Transparency = ShowHitboxesSetting.Value and 0.1 or 1
 
-                        if i == 1 then
-                            task.spawn(RunDragBlockV2IntervalCheck, Part.Size, Part.CFrame)
-                        end
                         Part.Parent = Hitboxes
                         Debris:AddItem(Part, 0.4)
 
@@ -2257,10 +2276,12 @@ local FeatureLoadout; FeatureLoadout = {
                                 UseActorAbility:FireServer("UseActorAbility", {"Block"})
                             end
                             if GetValue("DragBlock", false) and not IsHelplessActive() then
-                                local FollowDistance = GetValue("DragBlockGuaranteeABH", false) and GetValue("DragBlockGuaranteeMovement") or nil
-                                DragBlockAttackingKiller(Killer, FollowDistance)
+                                DragBlockAttackingKiller(Killer)
                             end
                             break
+                        end
+                        if i == DRAG_BLOCK_V2_CHECK then
+                            RunDragBlockV2Check(Part.Size, Part.CFrame)
                         end
                         task.wait(0.02)
                     end
@@ -2420,9 +2441,6 @@ local FeatureLoadout; FeatureLoadout = {
                                     Part.Material = Enum.Material.ForceField
                                     Part.Transparency = ShowHitboxesSetting.Value and 0.1 or 1
 
-                                    if i == 1 then
-                                        task.spawn(RunDragBlockV2IntervalCheck, Part.Size, Part.CFrame)
-                                    end
                                     Part.Parent = Hitboxes
                                     Debris:AddItem(Part,0.4)
                                     local Hitbox = workspace:GetPartsInPart(Part,SelfParams)
@@ -2430,8 +2448,7 @@ local FeatureLoadout; FeatureLoadout = {
                                         if FireSignal and MainUI:FindFirstChild("AbilityContainer"):FindFirstChild("Block") then
                                             FireSignal(MainUI.AbilityContainer.Block.MouseButton1Click)
                                             if GetValue("DragBlock", false) then
-                                                local FollowDistance = GetValue("DragBlockGuaranteeABH", false) and GetValue("DragBlockGuaranteeMovement") or nil
-                                                DragBlockAttackingKiller(Killer, FollowDistance)
+                                                DragBlockAttackingKiller(Killer)
                                             end
                                             break
                                         end
@@ -2442,10 +2459,12 @@ local FeatureLoadout; FeatureLoadout = {
                                             UseActorAbility:FireServer("UseActorAbility",{"Block"})
                                         end
                                         if GetValue("DragBlock", false) then
-                                            local FollowDistance = GetValue("DragBlockGuaranteeABH", false) and GetValue("DragBlockGuaranteeMovement") or nil
-                                            DragBlockAttackingKiller(Killer, FollowDistance)
+                                            DragBlockAttackingKiller(Killer)
                                         end
                                         break
+                                    end
+                                    if i == DRAG_BLOCK_V2_CHECK then
+                                        RunDragBlockV2Check(Part.Size, Part.CFrame)
                                     end
                                     task.wait(0.02)
                                 end
