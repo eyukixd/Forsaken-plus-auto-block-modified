@@ -1,4 +1,4 @@
--- Patch 191: Restore loading from Patch 189 and isolate Drag Block V2 errors.
+-- Patch 191 base: Restore loading from Patch 189.
 -- Forsaken Plus Made by Naiko Scripts --
 -- Copies of this script must contain the original credits and be open source --
 
@@ -100,14 +100,12 @@ local ModulesOptions,LastTrack,NoliConfig,GetAnimationType,LastAnimOriginalUsed,
 ColorPresets = {["White"] = Color3.fromRGB(255,255,255),["Teal"] = Color3.fromRGB(3,252,157),["Green"] = Color3.fromRGB(0,255,0),["Purple"] = Color3.fromRGB(158, 0, 179),["Red"] = Color3.fromRGB(255,0,0),["Blue"] = Color3.fromRGB(0,0,255),["Cyan"] = Color3.fromRGB(0,255,255),["Gold"] = Color3.fromRGB(255,215,0),["Orange"] = Color3.fromRGB(255,165,0)}
 IgnoreKeybinds = {"W", "A", "S", "D"}
 GameVersionForScript = "2026-09-29"
--- Patch 194: force-stop Drag Block at the configured distance and make V2 the literal 4th existing ABH check.
+-- Patch 195: harden the normal Drag Block cooldown.
 -- Physically walks toward the killer while Auto Block is active.
 -- All survivor movement inputs are blocked until the routine finishes.
--- Drag Block and Drag Block V2 use the same shared cooldown,
--- while each configuration keeps its own movement/stop slider.
 local DragBlockBusy = false
 local DragBlockToken = 0
-local DragBlockFollowCooldownUntil = 0
+local DragBlockLastFollowAt = -math.huge
 local FOLLOW_KILLER_COOLDOWN = 27
 local CancelDragBlockFollow = nil
 
@@ -120,11 +118,12 @@ local function IsHelplessActive()
     return LocalCharacter:GetAttribute("AbilitiesDisabled") == true
 end
 
--- Both Drag Block modes share the same mover/cooldown and Hold Player Duration.
--- The optional V2 distance is a movement cap, not a stop-distance threshold.
-local function DragBlockAttackingKiller(Killer, MaxMovementDistance)
+-- Normal Drag Block only.  Cooldown is recorded when a valid follow trigger
+-- starts, so repeated ABH/sound callbacks cannot restart it early.
+local function DragBlockAttackingKiller(Killer)
     if DragBlockBusy or not GetValue("DragBlock", false) then return end
-    if os.clock() < DragBlockFollowCooldownUntil then return end
+    local Now = time()
+    if Now - DragBlockLastFollowAt < FOLLOW_KILLER_COOLDOWN then return end
     if not Killer or not Killer.Parent then return end
 
     local Character = LocalCharacter
@@ -135,18 +134,13 @@ local function DragBlockAttackingKiller(Killer, MaxMovementDistance)
     local ContextActionService = game:GetService("ContextActionService")
     local Players = game:GetService("Players")
     local MovementActionName = "AutoBlockFollowMovementOverride"
-    -- Both modes use the regular stop-distance setting.
+    -- Normal Drag Block uses the regular stop-distance setting.
     local KillerNameLower = string.lower(Killer.Name or "")
     local STOP_DISTANCE = tonumber(GetValue("DragBlockStopDistance")) or (KillerNameLower:find("c00lkidd", 1, true) and 2 or 3)
-    local MAX_MOVEMENT_DISTANCE = tonumber(MaxMovementDistance)
-    if MAX_MOVEMENT_DISTANCE then
-        MAX_MOVEMENT_DISTANCE = math.max(0.5, MAX_MOVEMENT_DISTANCE)
-    end
     -- Give MoveTo enough time to actually reach the configured target.
     -- The old 0.2s timeout could end the routine before any meaningful movement occurred.
     local HOLD_DURATION = tonumber(GetValue("DragBlockHoldDuration")) or 0.2
     local MOVE_TIMEOUT = math.max(1.5, HOLD_DURATION + 1.0)
-    local StartFlatPosition = Vector3.new(Root.Position.X, 0, Root.Position.Z)
 
     local function GetFlatDistance()
         if not Root or not Root.Parent or not KillerRoot or not KillerRoot.Parent then
@@ -155,9 +149,9 @@ local function DragBlockAttackingKiller(Killer, MaxMovementDistance)
         local Delta = Vector3.new(KillerRoot.Position.X - Root.Position.X, 0, KillerRoot.Position.Z - Root.Position.Z)
         return Delta.Magnitude
     end
-    -- Start the shared cooldown on every valid follow trigger, even if the
-    -- player is already inside the stop radius and no movement is needed.
-    DragBlockFollowCooldownUntil = os.clock() + FOLLOW_KILLER_COOLDOWN
+    -- Start cooldown only after a valid follow trigger has been accepted.
+    -- This timestamp cannot be shortened by later attack callbacks.
+    DragBlockLastFollowAt = Now
     if GetFlatDistance() <= STOP_DISTANCE then return end
 
     DragBlockBusy = true
@@ -278,12 +272,6 @@ local function DragBlockAttackingKiller(Killer, MaxMovementDistance)
             FinishDragBlock()
             return
         end
-        if MAX_MOVEMENT_DISTANCE
-            and (Vector3.new(Root.Position.X, 0, Root.Position.Z) - StartFlatPosition).Magnitude >= MAX_MOVEMENT_DISTANCE then
-            FinishDragBlock()
-            return
-        end
-
         if os.clock() - SmoothLookStarted >= SMOOTH_LOOK_DURATION then
             return
         end
@@ -308,7 +296,7 @@ local function DragBlockAttackingKiller(Killer, MaxMovementDistance)
             FinishDragBlock()
             return
         end
-        local TargetDistance = MAX_MOVEMENT_DISTANCE and math.max(STOP_DISTANCE, distance - MAX_MOVEMENT_DISTANCE) or STOP_DISTANCE
+        local TargetDistance = STOP_DISTANCE
 
         if distance > 0.05 then
             local startedMove = os.clock()
@@ -329,16 +317,8 @@ local function DragBlockAttackingKiller(Killer, MaxMovementDistance)
                     FinishDragBlock()
                     return
                 end
-                if MAX_MOVEMENT_DISTANCE
-                    and (Vector3.new(Root.Position.X, 0, Root.Position.Z) - StartFlatPosition).Magnitude >= MAX_MOVEMENT_DISTANCE then
-                    FinishDragBlock()
-                    return
-                end
-
                 if CurrentDistance > TargetDistance and CurrentDistance > 0.05 then
                     -- Aim at a point on the player's current ground plane.
-                    -- V2 stops after its movement budget; normal Drag Block
-                    -- continues until the shared stop-distance is reached.
                     local TargetPosition = Vector3.new(
                         KillerRoot.Position.X - CurrentDirection.Unit.X * TargetDistance,
                         Root.Position.Y,
@@ -2073,28 +2053,35 @@ local FeatureLoadout; FeatureLoadout = {
             ["Requirement"] = "AutoBlock",
             ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
         },
-        ["DragBlockGuaranteeABH"] = {
-            ["DisplayDescription"] = "Drag Block V2 BETA - makes the 4th ABH check 6 studs side-to-side and 7 studs front-to-back with no displacement",
-            ["DisplayTitle"] = "Drag Block V2",
-            ["LayoutOrder"] = 15.1,
-            ["Savable"] = true,
-            ["InstanceType"] = "BoolValue",
-            ["DefaultInstanceValue"] = false,
-            ["Requirement"] = "AutoBlock|DragBlock"
-        },
-        ["DragBlockGuaranteeMovement"] = {
-            ["DisplayDescription"] = "How far the separate Drag Block V2 moves the player toward the killer (studs)",
-            ["DisplayTitle"] = "V2 Drag Movement (Studs)",
-            ["LayoutOrder"] = 15.2,
+        ["AutoBlockHitboxTreachstone"] = {
+            ["DisplayDescription"] = "Treachstone ABH size adjustment (studs)",
+            ["DisplayTitle"] = "Treachstone ABH",
+            ["LayoutOrder"] = 27,
             ["Savable"] = true,
             ["InstanceType"] = "NumberValue",
-            ["DefaultInstanceValue"] = 3,
-            ["Requirement"] = "AutoBlock|DragBlock|DragBlockGuaranteeABH",
-            ["ExtraData"] = {
-                ["MaxValue"] = 10,
-                ["MinValue"] = 0.5,
-                ["Step"] = 0.25
-            }
+            ["DefaultInstanceValue"] = 0,
+            ["Requirement"] = "AutoBlock",
+            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
+        },
+        ["AutoBlockHitboxVanity"] = {
+            ["DisplayDescription"] = "Vanity ABH size adjustment (studs)",
+            ["DisplayTitle"] = "Vanity ABH",
+            ["LayoutOrder"] = 28,
+            ["Savable"] = true,
+            ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 0,
+            ["Requirement"] = "AutoBlock",
+            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
+        },
+        ["AutoBlockHitboxCombatInitiation"] = {
+            ["DisplayDescription"] = "Combat Initiation ABH size adjustment (studs)",
+            ["DisplayTitle"] = "Combat Initiation ABH",
+            ["LayoutOrder"] = 29,
+            ["Savable"] = true,
+            ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 0,
+            ["Requirement"] = "AutoBlock",
+            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
         },
         ["AutoBlock"] = {
             ["DisplayDescription"] = "Uses the block ability automatically when about to get hit (REQUIRES GOOD PING)",
@@ -2171,64 +2158,6 @@ local FeatureLoadout; FeatureLoadout = {
                     if not Sound or not Sound:IsA("Sound") then return nil end
                     return tostring(Sound.SoundId or ""):match("%d+")
                 end
-
-                -- Drag Block V2 is one additional check on ABH interval 4.
-                -- It never resizes or repositions a normal ABH hitbox.
-                local DRAG_BLOCK_V2_CHECK = 4
-                local DRAG_BLOCK_V2_SIDE = 6
-                local DRAG_BLOCK_V2_FRONT = 7
-
-                local function RunDragBlockV2Check(NormalHitboxSize, NormalHitboxCFrame)
-                    if not GetValue("DragBlockGuaranteeABH", false) then return end
-                    if not GetValue("AutoBlock") or IsHelplessActive() then return end
-                    if not LocalCharacter or LocalCharacter.Parent ~= SurvivorsFolder then return end
-                    if not QueryHitbox or not QueryHitbox.Parent then return end
-                    local LocalQueryHitbox = LocalCharacter:FindFirstChild("QueryHitbox")
-                    if not LocalQueryHitbox then return end
-
-                    local AbilityContainer = MainUI and MainUI:FindFirstChild("AbilityContainer")
-                    local BlockButton = AbilityContainer and AbilityContainer:FindFirstChild("Block")
-                    if not BlockButton then return end
-
-                    SelfParams.FilterDescendantsInstances = {LocalQueryHitbox}
-                    local Part = Instance.new("Part")
-                    Part.Name = "KillerDetectHitboxV2"
-                    Part.Color = BrickColor.new("Really black").Color
-                    local V2Size = NormalHitboxSize * 1.25
-                    Part.Size = Vector3.new(
-                        math.max(DRAG_BLOCK_V2_SIDE, V2Size.X),
-                        math.max(0.1, V2Size.Y),
-                        math.max(DRAG_BLOCK_V2_FRONT, V2Size.Z)
-                    )
-                    Part.CFrame = NormalHitboxCFrame
-                    Part.CanCollide = false
-                    Part.Anchored = true
-                    Part.CastShadow = false
-                    Part.Material = Enum.Material.ForceField
-                    Part.Transparency = ShowHitboxesSetting and ShowHitboxesSetting.Value and 0.1 or 1
-                    Part.Parent = Hitboxes
-
-                    local Hitbox = workspace:GetPartsInPart(Part, SelfParams)
-                    -- This special hitbox is for exactly one overlap query on
-                    -- interval 4. Destroy it now; do not leave it visible over
-                    -- the remaining normal ABH intervals.
-                    Part:Destroy()
-                    if #Hitbox > 0 then
-                        if FireSignal and BlockButton then
-                            FireSignal(BlockButton.MouseButton1Click)
-                        elseif GetValue("OfficialGame") and UseActorAbility then
-                            UseActorAbility:FireServer("UseActorAbility", {"Block"})
-                        elseif UseActorAbility then
-                            UseActorAbility:FireServer("UseActorAbility", "Block")
-                            UseActorAbility:FireServer("UseActorAbility", {"Block"})
-                        end
-                        if GetValue("DragBlock", false) and not IsHelplessActive() then
-                            local FollowDistance = GetValue("DragBlockGuaranteeMovement")
-                            DragBlockAttackingKiller(Killer, FollowDistance)
-                        end
-                    end
-                end
-
                 local function RunC00lkiddSoundAutoBlock()
                     if not GetValue("AutoBlock") or IsHelplessActive() then return end
                     if string.lower(Killer.Name or "") ~= "c00lkidd" then return end
@@ -2295,9 +2224,6 @@ local FeatureLoadout; FeatureLoadout = {
                             end
                             break
                         end
-                        if i == DRAG_BLOCK_V2_CHECK then
-                            RunDragBlockV2Check(Part.Size, Part.CFrame)
-                        end
                         task.wait(0.02)
                     end
                 end
@@ -2357,7 +2283,12 @@ local FeatureLoadout; FeatureLoadout = {
                                         ["noli"] = "AutoBlockHitboxNoli",
                                         ["1x1x1x1"] = "AutoBlockHitbox1x1x1x1",
                                         ["c00lkidd"] = "AutoBlockHitboxC00lkidd",
-                                        ["azure"] = "AutoBlockHitboxAzure"
+                                        ["azure"] = "AutoBlockHitboxAzure",
+                                        ["treachstone"] = "AutoBlockHitboxTreachstone",
+                                        ["vanity"] = "AutoBlockHitboxVanity",
+                                        ["vanity slasher"] = "AutoBlockHitboxVanity",
+                                        ["combat initiation"] = "AutoBlockHitboxCombatInitiation",
+                                        ["combat initiation slasher"] = "AutoBlockHitboxCombatInitiation"
                                     }
                                     local PreviewKillerHitboxKey = PreviewKillerHitboxKeys[PreviewKillerNameLower] or ("AutoBlockHitbox" .. Killer.Name:gsub("[^%w]", ""))
                                     if AnimType:lower() == "golemslash" then
@@ -2418,7 +2349,12 @@ local FeatureLoadout; FeatureLoadout = {
                                         ["noli"] = "AutoBlockHitboxNoli",
                                         ["1x1x1x1"] = "AutoBlockHitbox1x1x1x1",
                                         ["c00lkidd"] = "AutoBlockHitboxC00lkidd",
-                                        ["azure"] = "AutoBlockHitboxAzure"
+                                        ["azure"] = "AutoBlockHitboxAzure",
+                                        ["treachstone"] = "AutoBlockHitboxTreachstone",
+                                        ["vanity"] = "AutoBlockHitboxVanity",
+                                        ["vanity slasher"] = "AutoBlockHitboxVanity",
+                                        ["combat initiation"] = "AutoBlockHitboxCombatInitiation",
+                                        ["combat initiation slasher"] = "AutoBlockHitboxCombatInitiation"
                                     }
                                     local KillerHitboxKey = KillerHitboxKeys[KillerNameLower] or ("AutoBlockHitbox" .. Killer.Name:gsub("[^%w]", ""))
                                     if AnimType and AnimType:lower() == "golemslash" then
@@ -2477,9 +2413,6 @@ local FeatureLoadout; FeatureLoadout = {
                                             DragBlockAttackingKiller(Killer)
                                         end
                                         break
-                                    end
-                                    if i == DRAG_BLOCK_V2_CHECK then
-                                        RunDragBlockV2Check(Part.Size, Part.CFrame)
                                     end
                                     task.wait(0.02)
                                 end
@@ -2682,7 +2615,7 @@ local FeatureLoadout; FeatureLoadout = {
             }
         },
         ["DragBlockHoldDuration"] = {
-            ["DisplayDescription"] = "How long Drag Block and Drag Block V2 hold/move the player toward the killer (seconds)",
+            ["DisplayDescription"] = "How long Drag Block holds/moves the player toward the killer (seconds)",
             ["DisplayTitle"] = "Hold Player Duration",
             ["LayoutOrder"] = 16.2,
             ["Savable"] = true,
@@ -2961,9 +2894,73 @@ local FeatureLoadout; FeatureLoadout = {
             ["InstanceType"] = "BoolValue",
             ["DefaultInstanceValue"] = false,
             ["HandleNoliNPC"] = function(self,Value)
+                -- Keep hidden Noli clones out of collision/query/physics work.
+                -- Moving the model to Lighting alone does not make its BaseParts
+                -- non-physical, so the clone could continue participating in
+                -- engine spatial/physics processing while hidden.
+                self.NoliNPCFrozenState = self.NoliNPCFrozenState or setmetatable({}, {__mode = "k"})
+
+                local function FreezeHiddenNoli(Model)
+                    if not Model or Players:GetPlayerFromCharacter(Model) then return end
+                    if not self.NoliNPCFrozenState[Model] then
+                        local State = {Parts = {}, Humanoids = {}}
+                        for _,Descendant in Model:GetDescendants() do
+                            if Descendant:IsA("BasePart") then
+                                State.Parts[Descendant] = {
+                                    Anchored = Descendant.Anchored,
+                                    CanCollide = Descendant.CanCollide,
+                                    CanTouch = Descendant.CanTouch,
+                                    CanQuery = Descendant.CanQuery,
+                                    Massless = Descendant.Massless
+                                }
+                                Descendant.Anchored = true
+                                Descendant.CanCollide = false
+                                Descendant.CanTouch = false
+                                Descendant.CanQuery = false
+                                Descendant.Massless = true
+                            elseif Descendant:IsA("Humanoid") then
+                                State.Humanoids[Descendant] = {AutoRotate = Descendant.AutoRotate}
+                                Descendant.AutoRotate = false
+                            end
+                        end
+                        self.NoliNPCFrozenState[Model] = State
+                    else
+                        for Part in pairs(self.NoliNPCFrozenState[Model].Parts) do
+                            if Part and Part.Parent then
+                                Part.Anchored = true
+                                Part.CanCollide = false
+                                Part.CanTouch = false
+                                Part.CanQuery = false
+                                Part.Massless = true
+                            end
+                        end
+                    end
+                end
+
+                local function RestoreNoli(Model)
+                    local State = self.NoliNPCFrozenState and self.NoliNPCFrozenState[Model]
+                    if not State then return end
+                    for Part,Original in pairs(State.Parts) do
+                        if Part and Part.Parent then
+                            Part.Anchored = Original.Anchored
+                            Part.CanCollide = Original.CanCollide
+                            Part.CanTouch = Original.CanTouch
+                            Part.CanQuery = Original.CanQuery
+                            Part.Massless = Original.Massless
+                        end
+                    end
+                    for Humanoid,Original in pairs(State.Humanoids) do
+                        if Humanoid and Humanoid.Parent then
+                            Humanoid.AutoRotate = Original.AutoRotate
+                        end
+                    end
+                    self.NoliNPCFrozenState[Model] = nil
+                end
+
                 if Value then
                     for i,v in KillersFolder:GetChildren() do
                         if v.Name:lower() == "noli" and not Players:GetPlayerFromCharacter(v) then
+                            FreezeHiddenNoli(v)
                             v.Parent = Lighting
                             v:PivotTo(v:GetPivot() * CFrame.new(0,-100,0))
                         end
@@ -2980,6 +2977,7 @@ local FeatureLoadout; FeatureLoadout = {
                         if v.Name:lower() == "noli" then
                             v.Parent = InGame
                             v:PivotTo(v:GetPivot() * CFrame.new(0,100,0))
+                            RestoreNoli(v)
                         end
                     end
                 end
@@ -3588,7 +3586,9 @@ local FeatureLoadout; FeatureLoadout = {
                 end)
                 Players.PlayerAdded:Connect(function(Player)
                     self:HandleCheckForMod(Player)
-                    task.delay(2,HandlePrivacySettings,self,Player)
+                    task.delay(2, function()
+                        self:HandlePrivacySettings(Player)
+                    end)
                 end)
             end
         },
