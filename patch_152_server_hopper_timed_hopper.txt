@@ -100,8 +100,10 @@ local ModulesOptions,LastTrack,NoliConfig,GetAnimationType,LastAnimOriginalUsed,
 ColorPresets = {["White"] = Color3.fromRGB(255,255,255),["Teal"] = Color3.fromRGB(3,252,157),["Green"] = Color3.fromRGB(0,255,0),["Purple"] = Color3.fromRGB(158, 0, 179),["Red"] = Color3.fromRGB(255,0,0),["Blue"] = Color3.fromRGB(0,0,255),["Cyan"] = Color3.fromRGB(0,255,255),["Gold"] = Color3.fromRGB(255,215,0),["Orange"] = Color3.fromRGB(255,165,0)}
 IgnoreKeybinds = {"W", "A", "S", "D"}
 GameVersionForScript = "2026-09-29"
--- Patch 195: harden the normal Drag Block cooldown.
+-- Patch 198: Drag Block Helpless/cooldown handling.
 -- Physically walks toward the killer while Auto Block is active.
+-- Helpless pauses an existing follow instead of resetting/cancelling it.
+-- New Drag Block triggers are rejected during Helpless; cooldown time still advances.
 -- All survivor movement inputs are blocked until the routine finishes.
 local DragBlockBusy = false
 local DragBlockToken = 0
@@ -122,6 +124,9 @@ end
 -- starts, so repeated ABH/sound callbacks cannot restart it early.
 local function DragBlockAttackingKiller(Killer)
     if DragBlockBusy or not GetValue("DragBlock", false) then return end
+    -- A new Drag Block may not start while Helpless is active.
+    -- Existing Drag Block cooldowns continue normally during Helpless.
+    if IsHelplessActive() then return end
     local Now = time()
     if Now - DragBlockLastFollowAt < FOLLOW_KILLER_COOLDOWN then return end
     if not Killer or not Killer.Parent then return end
@@ -260,9 +265,14 @@ local function DragBlockAttackingKiller(Killer)
             or not Root
             or not Root.Parent
             or not KillerRoot
-            or not KillerRoot.Parent
-            or IsHelplessActive() then
+            or not KillerRoot.Parent then
             FinishDragBlock()
+            return
+        end
+
+        -- Helpless pauses Drag Block without resetting/cancelling it.
+        -- The follow resumes automatically when Helpless ends.
+        if IsHelplessActive() then
             return
         end
 
@@ -303,11 +313,23 @@ local function DragBlockAttackingKiller(Killer)
             while DragBlockBusy
                 and Token == DragBlockToken
                 and GetValue("DragBlock", false)
-                and not IsHelplessActive()
                 and Humanoid.Health > 0
                 and Killer.Parent
-                and KillerRoot.Parent
-                and os.clock() - startedMove < MOVE_TIMEOUT do
+                and KillerRoot.Parent do
+                -- Helpless pauses the active follow without cancelling it.
+                -- The Drag Block cooldown remains independent and continues
+                -- advancing normally because DragBlockLastFollowAt is not reset.
+                if IsHelplessActive() then
+                    task.wait(0.08)
+                    continue
+                end
+
+                -- Only count time toward the movement timeout while the follow
+                -- is actually allowed to run. Helpless time is not consumed.
+                if os.clock() - startedMove >= MOVE_TIMEOUT then
+                    break
+                end
+
                 local CurrentDirection = Vector3.new(KillerRoot.Position.X - Root.Position.X, 0, KillerRoot.Position.Z - Root.Position.Z)
                 local CurrentDistance = CurrentDirection.Magnitude
 
@@ -2138,7 +2160,7 @@ local FeatureLoadout; FeatureLoadout = {
 
                     local CustomHitbox = CustomHitboxes["c00lkidd"]
                     local KillerNameLower = Killer.Name:lower()
-                    for i = 1, 12 do
+                    for i = 1, 9 do
                         if IsHelplessActive() or not GetValue("AutoBlock") then return end
                         SelfParams.FilterDescendantsInstances = {LocalCharacter:FindFirstChild("QueryHitbox")}
                         local Part = Instance.new("Part")
@@ -2427,7 +2449,7 @@ local FeatureLoadout; FeatureLoadout = {
 
                                 if GetValue("AutoBlock") and LocalCharacter and LocalCharacter:FindFirstChild("QueryHitbox") and LocalCharacter.Parent == SurvivorsFolder and MainUI:FindFirstChild("AbilityContainer") and MainUI:FindFirstChild("AbilityContainer"):FindFirstChild("Block") then
                                 local CustomHitbox = CustomHitboxes[AnimType:lower()] or CustomHitboxes[Killer.Name:lower()]
-                                for i = 1,10 do
+                                for i = 1,(Killer.Name:lower() == "noli" and 11 or 10) do
                                     SelfParams.FilterDescendantsInstances = {LocalCharacter:FindFirstChild("QueryHitbox")}
                                     local Part = Instance.new("Part")
                                     Part.Name = "KillerDetectHitbox"
