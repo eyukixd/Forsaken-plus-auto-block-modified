@@ -2053,36 +2053,6 @@ local FeatureLoadout; FeatureLoadout = {
             ["Requirement"] = "AutoBlock",
             ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
         },
-        ["AutoBlockHitboxTreachstone"] = {
-            ["DisplayDescription"] = "Treachstone ABH size adjustment (studs)",
-            ["DisplayTitle"] = "Treachstone ABH",
-            ["LayoutOrder"] = 27,
-            ["Savable"] = true,
-            ["InstanceType"] = "NumberValue",
-            ["DefaultInstanceValue"] = 0,
-            ["Requirement"] = "AutoBlock",
-            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
-        },
-        ["AutoBlockHitboxVanity"] = {
-            ["DisplayDescription"] = "Vanity ABH size adjustment (studs)",
-            ["DisplayTitle"] = "Vanity ABH",
-            ["LayoutOrder"] = 28,
-            ["Savable"] = true,
-            ["InstanceType"] = "NumberValue",
-            ["DefaultInstanceValue"] = 0,
-            ["Requirement"] = "AutoBlock",
-            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
-        },
-        ["AutoBlockHitboxCombatInitiation"] = {
-            ["DisplayDescription"] = "Combat Initiation ABH size adjustment (studs)",
-            ["DisplayTitle"] = "Combat Initiation ABH",
-            ["LayoutOrder"] = 29,
-            ["Savable"] = true,
-            ["InstanceType"] = "NumberValue",
-            ["DefaultInstanceValue"] = 0,
-            ["Requirement"] = "AutoBlock",
-            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
-        },
         ["AutoBlock"] = {
             ["DisplayDescription"] = "Uses the block ability automatically when about to get hit (REQUIRES GOOD PING)",
             ["DisplayTitle"] = "Guest1337 Auto Block",
@@ -2258,10 +2228,134 @@ local FeatureLoadout; FeatureLoadout = {
                         end
                     end)
                 end
+
+                -- Treachstone is sound-only. Use the same ABH/sound logic as C00lkidd,
+                -- but search Workspace as well because the attack sound may not be parented
+                -- directly under the killer model.
+                local TreachstoneAttackSounds = {
+                    ["140242176732868"] = true
+                }
+
+                local TreachstoneSoundConnections = {}
+                local TreachstoneSoundLastTrigger = {}
+
+                local function GetTreachstoneSoundAssetId(Sound)
+                    if not Sound or not Sound:IsA("Sound") then return nil end
+                    return tostring(Sound.SoundId or ""):match("%d+")
+                end
+
+                local function RunTreachstoneSoundAutoBlock()
+                    if not GetValue("AutoBlock") or IsHelplessActive() then return end
+                    if string.lower(Killer.Name or "") ~= "treachstone" then return end
+                    if not LocalCharacter or not LocalCharacter:FindFirstChild("QueryHitbox") or LocalCharacter.Parent ~= SurvivorsFolder then return end
+                    local AbilityContainer = MainUI and MainUI:FindFirstChild("AbilityContainer")
+                    local BlockButton = AbilityContainer and AbilityContainer:FindFirstChild("Block")
+                    if not BlockButton then return end
+
+                    local CustomHitbox = CustomHitboxes["johndoe"]
+                    local KillerNameLower = Killer.Name:lower()
+                    for i = 1, 12 do
+                        if IsHelplessActive() or not GetValue("AutoBlock") then return end
+                        SelfParams.FilterDescendantsInstances = {LocalCharacter:FindFirstChild("QueryHitbox")}
+                        local Part = Instance.new("Part")
+                        Part.Name = "KillerDetectHitbox"
+                        Part.Color = BrickColor.new("Really black").Color
+
+                        local BaseHitboxSize = (CustomHitbox and CustomHitbox["Size"] or Vector3.new(5.2, 6, 5.65)) * 2.2
+                        local GlobalHitboxAdjustment = GetCurrentHitboxAdjustment("AutoBlockHitboxAllKiller")
+                        local IndividualHitboxAdjustment = GetCurrentHitboxAdjustment("AutoBlockHitboxJohnDoe")
+                        local TotalHitboxAdjustment = GlobalHitboxAdjustment + IndividualHitboxAdjustment
+                        Part.Size = BaseHitboxSize + Vector3.new(TotalHitboxAdjustment, TotalHitboxAdjustment, TotalHitboxAdjustment)
+                        Part.Size = Vector3.new(math.max(0.1, Part.Size.X), math.max(0.1, Part.Size.Y), math.max(0.1, Part.Size.Z))
+
+                        local DetectionOffset = CustomHitbox and CustomHitbox["Offset"] or CFrame.new(0,0,-3.5)
+                        if GetValue("DragBlock", false) then
+                            Part.Size = Part.Size + Vector3.new(0,0,2)
+                            Part.CFrame = QueryHitbox.CFrame * DetectionOffset * CFrame.new(0,0,-1)
+                        else
+                            Part.CFrame = QueryHitbox.CFrame * DetectionOffset
+                        end
+
+                        Part.CanCollide = false
+                        Part.Anchored = true
+                        Part.CastShadow = false
+                        Part.Material = Enum.Material.ForceField
+                        Part.Transparency = ShowHitboxesSetting.Value and 0.1 or 1
+                        Part.Parent = Hitboxes
+                        Debris:AddItem(Part, 0.4)
+
+                        local Hitbox = workspace:GetPartsInPart(Part, SelfParams)
+                        if #Hitbox > 0 then
+                            if FireSignal and BlockButton then
+                                FireSignal(BlockButton.MouseButton1Click)
+                            elseif GetValue("OfficialGame") and UseActorAbility then
+                                UseActorAbility:FireServer("UseActorAbility", {"Block"})
+                            elseif UseActorAbility then
+                                UseActorAbility:FireServer("UseActorAbility", "Block")
+                                UseActorAbility:FireServer("UseActorAbility", {"Block"})
+                            end
+                            if GetValue("DragBlock", false) and not IsHelplessActive() then
+                                DragBlockAttackingKiller(Killer)
+                            end
+                            break
+                        end
+                        task.wait(0.02)
+                    end
+                end
+
+                local function WatchTreachstoneSound(Sound)
+                    if not Sound or not Sound:IsA("Sound") then return end
+                    if TreachstoneSoundConnections[Sound] then return end
+
+                    local function TryWatch()
+                        local SoundId = GetTreachstoneSoundAssetId(Sound)
+                        if not SoundId or not TreachstoneAttackSounds[SoundId] then return end
+                        if TreachstoneSoundConnections[Sound] then return end
+
+                        local function Trigger()
+                            if not Sound.Parent or not Sound.Playing then return end
+                            if not GetValue("AutoBlock") or IsHelplessActive() then return end
+                            local Now = os.clock()
+                            if TreachstoneSoundLastTrigger[Sound] and Now - TreachstoneSoundLastTrigger[Sound] < 0.08 then return end
+                            TreachstoneSoundLastTrigger[Sound] = Now
+                            task.spawn(RunTreachstoneSoundAutoBlock)
+                        end
+
+                        TreachstoneSoundConnections[Sound] = Sound:GetPropertyChangedSignal("Playing"):Connect(Trigger)
+                        if Sound.Playing then Trigger() end
+                    end
+
+                    TryWatch()
+                    Sound:GetPropertyChangedSignal("SoundId"):Connect(TryWatch)
+                end
+
+                if string.lower(Killer.Name or "") == "treachstone" then
+                    -- Match C00lkidd's watcher, while also covering sounds that are
+                    -- created outside the killer model.
+                    for _, Descendant in workspace:GetDescendants() do
+                        if Descendant:IsA("Sound") then
+                            WatchTreachstoneSound(Descendant)
+                        end
+                    end
+
+                    workspace.DescendantAdded:Connect(function(Descendant)
+                        if Descendant:IsA("Sound") then
+                            WatchTreachstoneSound(Descendant)
+                        end
+                    end)
+                end
+
                 if KillerAnimator then
                     KillerAnimator.AnimationPlayed:Connect(function(Track)
                         if Players:GetPlayerFromCharacter(Killer) and string.lower(Killer.Name or "") ~= "c00lkidd" then
-                            local AnimType,KillerName = GetAnimationType(Track.Animation.AnimationId)
+                            local AnimationId = tostring(Track.Animation.AnimationId or "")
+                            local AnimType,KillerName = GetAnimationType(AnimationId)
+
+                            -- John Doe attack animation detected from the logged animation ID.
+                            if string.lower(Killer.Name or "") == "johndoe" and (AnimationId:match("%d+") == "87347358451124" or AnimationId:match("%d+") == "121778755277919") then
+                                AnimType = "attack"
+                            end
+
                             if AnimType and type(AnimType) == type("") and table.find(BlockableAttacks,AnimType:lower()) then
                                 local CustomHitbox = CustomHitboxes[AnimType:lower()] or CustomHitboxes[Killer.Name:lower()]
 
@@ -2284,11 +2378,11 @@ local FeatureLoadout; FeatureLoadout = {
                                         ["1x1x1x1"] = "AutoBlockHitbox1x1x1x1",
                                         ["c00lkidd"] = "AutoBlockHitboxC00lkidd",
                                         ["azure"] = "AutoBlockHitboxAzure",
-                                        ["treachstone"] = "AutoBlockHitboxTreachstone",
-                                        ["vanity"] = "AutoBlockHitboxVanity",
-                                        ["vanity slasher"] = "AutoBlockHitboxVanity",
-                                        ["combat initiation"] = "AutoBlockHitboxCombatInitiation",
-                                        ["combat initiation slasher"] = "AutoBlockHitboxCombatInitiation"
+                                        ["treachstone"] = "AutoBlockHitboxJohnDoe",
+                                        ["vanity"] = "AutoBlockHitboxSlasher",
+                                        ["vanity slasher"] = "AutoBlockHitboxSlasher",
+                                        ["combat initiation"] = "AutoBlockHitboxSlasher",
+                                        ["combat initiation slasher"] = "AutoBlockHitboxSlasher"
                                     }
                                     local PreviewKillerHitboxKey = PreviewKillerHitboxKeys[PreviewKillerNameLower] or ("AutoBlockHitbox" .. Killer.Name:gsub("[^%w]", ""))
                                     if AnimType:lower() == "golemslash" then
@@ -2333,7 +2427,7 @@ local FeatureLoadout; FeatureLoadout = {
 
                                 if GetValue("AutoBlock") and LocalCharacter and LocalCharacter:FindFirstChild("QueryHitbox") and LocalCharacter.Parent == SurvivorsFolder and MainUI:FindFirstChild("AbilityContainer") and MainUI:FindFirstChild("AbilityContainer"):FindFirstChild("Block") then
                                 local CustomHitbox = CustomHitboxes[AnimType:lower()] or CustomHitboxes[Killer.Name:lower()]
-                                for i = 1,12 do
+                                for i = 1,10 do
                                     SelfParams.FilterDescendantsInstances = {LocalCharacter:FindFirstChild("QueryHitbox")}
                                     local Part = Instance.new("Part")
                                     Part.Name = "KillerDetectHitbox"
@@ -2350,11 +2444,11 @@ local FeatureLoadout; FeatureLoadout = {
                                         ["1x1x1x1"] = "AutoBlockHitbox1x1x1x1",
                                         ["c00lkidd"] = "AutoBlockHitboxC00lkidd",
                                         ["azure"] = "AutoBlockHitboxAzure",
-                                        ["treachstone"] = "AutoBlockHitboxTreachstone",
-                                        ["vanity"] = "AutoBlockHitboxVanity",
-                                        ["vanity slasher"] = "AutoBlockHitboxVanity",
-                                        ["combat initiation"] = "AutoBlockHitboxCombatInitiation",
-                                        ["combat initiation slasher"] = "AutoBlockHitboxCombatInitiation"
+                                        ["treachstone"] = "AutoBlockHitboxJohnDoe",
+                                        ["vanity"] = "AutoBlockHitboxSlasher",
+                                        ["vanity slasher"] = "AutoBlockHitboxSlasher",
+                                        ["combat initiation"] = "AutoBlockHitboxSlasher",
+                                        ["combat initiation slasher"] = "AutoBlockHitboxSlasher"
                                     }
                                     local KillerHitboxKey = KillerHitboxKeys[KillerNameLower] or ("AutoBlockHitbox" .. Killer.Name:gsub("[^%w]", ""))
                                     if AnimType and AnimType:lower() == "golemslash" then
