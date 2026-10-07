@@ -99,8 +99,9 @@ OverriddenAnimations,AllAnimations,Values = {},{["Default Roblox"] = {["Idle"] =
 local ModulesOptions,LastTrack,NoliConfig,GetAnimationType,LastAnimOriginalUsed,UpdateAnim,CanPlayOverrideAnim,CurrentQTEAzure,TeleportSound,GetFunction
 ColorPresets = {["White"] = Color3.fromRGB(255,255,255),["Teal"] = Color3.fromRGB(3,252,157),["Green"] = Color3.fromRGB(0,255,0),["Purple"] = Color3.fromRGB(158, 0, 179),["Red"] = Color3.fromRGB(255,0,0),["Blue"] = Color3.fromRGB(0,0,255),["Cyan"] = Color3.fromRGB(0,255,255),["Gold"] = Color3.fromRGB(255,215,0),["Orange"] = Color3.fromRGB(255,165,0)}
 IgnoreKeybinds = {"W", "A", "S", "D"}
-GameVersionForScript = "2026-09-29"
+GameVersionForScript = "2026-10-06"
 -- Patch 198: Drag Block Helpless/cooldown handling.
+-- Patch 199: Added WallCheck gate for Auto Block and Drag Block.
 -- Physically walks toward the killer while Auto Block is active.
 -- Helpless pauses an existing follow instead of resetting/cancelling it.
 -- New Drag Block triggers are rejected during Helpless; cooldown time still advances.
@@ -120,10 +121,81 @@ local function IsHelplessActive()
     return LocalCharacter:GetAttribute("AbilitiesDisabled") == true
 end
 
+-- Patch 199: WallCheck prevents Auto Block and Drag Block from triggering
+-- when a solid obstacle is between the survivor and the attacking killer.
+-- It uses the same local/client-side raycast idea as the standalone tracer.
+local function IsWallCheckBlocked(Killer)
+    if not GetValue("WallCheck", true) then
+        return false
+    end
+
+    local Character = LocalCharacter
+    local Root = LocalRoot or (Character and Character:FindFirstChild("HumanoidRootPart"))
+    if not Character or not Character.Parent or not Root or not Root.Parent
+        or not Killer or not Killer.Parent then
+        return false
+    end
+
+    local KillerRoot = Killer:FindFirstChild("HumanoidRootPart")
+        or Killer:FindFirstChild("LowerTorso")
+        or Killer:FindFirstChild("Torso")
+    if not KillerRoot then
+        return false
+    end
+
+    local Origin = Root.Position
+    local Destination = KillerRoot.Position
+    local Direction = Destination - Origin
+    if Direction.Magnitude <= 0.05 then
+        return false
+    end
+
+    local Params = RaycastParams.new()
+    Params.FilterType = Enum.RaycastFilterType.Exclude
+    Params.FilterDescendantsInstances = {Character, Killer}
+    Params.IgnoreWater = true
+
+    -- Skip non-solid/query-only decorative parts and keep checking until the
+    -- line reaches the killer. Terrain or a solid collidable part counts as a wall.
+    local CurrentOrigin = Origin
+    local Remaining = Direction
+    for _ = 1, 12 do
+        local Result = workspace:Raycast(CurrentOrigin, Remaining, Params)
+        if not Result then
+            return false
+        end
+
+        local Hit = Result.Instance
+        if Hit:IsA("Terrain") then
+            return true
+        end
+
+        if Hit:IsA("BasePart") and Hit.CanCollide and Hit.Transparency < 1 then
+            return true
+        end
+
+        local ToHit = Result.Position - CurrentOrigin
+        local RemainingDistance = Remaining.Magnitude
+        if ToHit.Magnitude >= RemainingDistance - 0.05 then
+            return false
+        end
+
+        local Step = math.max(0.05, ToHit.Magnitude + 0.05)
+        CurrentOrigin += Remaining.Unit * Step
+        Remaining = Destination - CurrentOrigin
+        if Remaining.Magnitude <= 0.05 then
+            return false
+        end
+    end
+
+    return true
+end
+
 -- Normal Drag Block only.  Cooldown is recorded when a valid follow trigger
 -- starts, so repeated ABH/sound callbacks cannot restart it early.
 local function DragBlockAttackingKiller(Killer)
     if DragBlockBusy or not GetValue("DragBlock", false) then return end
+    if IsWallCheckBlocked(Killer) then return end
     -- A new Drag Block may not start while Helpless is active.
     -- Existing Drag Block cooldowns continue normally during Helpless.
     if IsHelplessActive() then return end
@@ -234,7 +306,13 @@ local function DragBlockAttackingKiller(Killer)
         if Humanoid and Humanoid.Parent then
             pcall(function()
                 if Root and Root.Parent then
+                    -- Immediately cancel any active MoveTo target so the
+                    -- survivor cannot continue walking after reaching the
+                    -- configured Stop Near Killer distance.
                     Humanoid:MoveTo(Root.Position)
+                    Humanoid:Move(Vector3.zero, true)
+                    Root.AssemblyLinearVelocity = Vector3.zero
+                    Root.AssemblyAngularVelocity = Vector3.zero
                 end
             end)
             Humanoid.WalkSpeed = OriginalWalkSpeed
@@ -335,6 +413,8 @@ local function DragBlockAttackingKiller(Killer)
 
                 -- Force-end as soon as the stop distance is reached.  This is
                 -- authoritative even if MoveTo has not reported completion.
+                -- Do not wait for Hold Player Duration once the stop distance
+                -- has been reached.
                 if CurrentDistance <= STOP_DISTANCE then
                     FinishDragBlock()
                     return
@@ -2075,6 +2155,14 @@ local FeatureLoadout; FeatureLoadout = {
             ["Requirement"] = "AutoBlock",
             ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
         },
+        ["WallCheck"] = {
+            ["DisplayDescription"] = "Prevents Auto Block and Drag Block from firing when a solid wall is between you and the killer",
+            ["DisplayTitle"] = "WallCheck",
+            ["LayoutOrder"] = 14.9,
+            ["Savable"] = true,
+            ["InstanceType"] = "BoolValue",
+            ["DefaultInstanceValue"] = true
+        },
         ["AutoBlock"] = {
             ["DisplayDescription"] = "Uses the block ability automatically when about to get hit (REQUIRES GOOD PING)",
             ["DisplayTitle"] = "Guest1337 Auto Block",
@@ -2132,6 +2220,42 @@ local FeatureLoadout; FeatureLoadout = {
                 local Humanoid = Killer:FindFirstChildOfClass("Humanoid") or Killer:WaitForChild("Humanoid")
                 local QueryHitbox = Killer:FindFirstChild("QueryHitbox") or Killer:WaitForChild("QueryHitbox")
                 local KillerAnimator = Humanoid:FindFirstChildOfClass("Animator")
+
+                -- Patch 200: recognize C00lkidd skins by their model name or
+                -- character/skin attributes instead of requiring the model to be
+                -- named exactly "c00lkidd".
+                local function IsC00lkiddKiller(Character)
+                    if not Character then return false end
+
+                    local function Matches(Value)
+                        if type(Value) ~= "string" then return false end
+                        local Name = string.lower(Value)
+                        local Compact = Name:gsub("[%s_%-]", "")
+
+                        if Compact == "c00lkidd"
+                            or Compact:find("^c00lkidd")
+                            or Compact == "c0llabk1dd"
+                            or Compact == "c00lskeleton95"
+                            or Compact == "dragondudes3" then
+                            return true
+                        end
+
+                        return false
+                    end
+
+                    if Matches(Character.Name) then return true end
+
+                    for _, AttributeName in {
+                        "Killer", "KillerName", "Character", "CharacterName",
+                        "Skin", "SkinName", "DisplayName", "ActorDisplayName"
+                    } do
+                        if Matches(Character:GetAttribute(AttributeName)) then
+                            return true
+                        end
+                    end
+
+                    return false
+                end
                 -- Patch 167: C00lkidd is sound-only. Its sound watcher is isolated from
                 -- the normal animation detector so regular Auto Block remains unchanged.
                 local C00lkiddAttackSounds = {
@@ -2140,7 +2264,8 @@ local FeatureLoadout; FeatureLoadout = {
                     ["84307400688050"] = true,
                     ["82221759983649"] = true,
                     ["105516183226360"] = true,
-                    ["124234993291213"] = true
+                    ["124234993291213"] = true,
+                    ["128195973631079"] = true
                 }
 
                 local C00lkiddSoundConnections = {}
@@ -2152,7 +2277,8 @@ local FeatureLoadout; FeatureLoadout = {
                 end
                 local function RunC00lkiddSoundAutoBlock()
                     if not GetValue("AutoBlock") or IsHelplessActive() then return end
-                    if string.lower(Killer.Name or "") ~= "c00lkidd" then return end
+                    if IsWallCheckBlocked(Killer) then return end
+                    if not IsC00lkiddKiller(Killer) then return end
                     if not LocalCharacter or not LocalCharacter:FindFirstChild("QueryHitbox") or LocalCharacter.Parent ~= SurvivorsFolder then return end
                     local AbilityContainer = MainUI and MainUI:FindFirstChild("AbilityContainer")
                     local BlockButton = AbilityContainer and AbilityContainer:FindFirstChild("Block")
@@ -2182,7 +2308,7 @@ local FeatureLoadout; FeatureLoadout = {
                             Part.CFrame = QueryHitbox.CFrame * DetectionOffset
                         end
 
-                        if KillerNameLower == "c00lkidd" then
+                        if IsC00lkiddKiller(Killer) then
                             -- Reduce only the forward reach by 2 studs while keeping the rear edge fixed.
                             Part.Size = Vector3.new(
                                 math.max(0.1, Part.Size.X),
@@ -2202,7 +2328,7 @@ local FeatureLoadout; FeatureLoadout = {
                         Debris:AddItem(Part, 0.4)
 
                         local Hitbox = workspace:GetPartsInPart(Part, SelfParams)
-                        if #Hitbox > 0 then
+                        if #Hitbox > 0 and not IsWallCheckBlocked(Killer) then
                             if FireSignal and BlockButton then
                                 FireSignal(BlockButton.MouseButton1Click)
                             elseif GetValue("OfficialGame") and UseActorAbility then
@@ -2238,7 +2364,7 @@ local FeatureLoadout; FeatureLoadout = {
                     if Sound.Playing then Trigger() end
                 end
 
-                if string.lower(Killer.Name or "") == "c00lkidd" then
+                if IsC00lkiddKiller(Killer) then
                     for _, Descendant in Killer:GetDescendants() do
                         if Descendant:IsA("Sound") then
                             WatchC00lkiddSound(Descendant)
@@ -2268,6 +2394,7 @@ local FeatureLoadout; FeatureLoadout = {
 
                 local function RunTreachstoneSoundAutoBlock()
                     if not GetValue("AutoBlock") or IsHelplessActive() then return end
+                    if IsWallCheckBlocked(Killer) then return end
                     if string.lower(Killer.Name or "") ~= "treachstone" then return end
                     if not LocalCharacter or not LocalCharacter:FindFirstChild("QueryHitbox") or LocalCharacter.Parent ~= SurvivorsFolder then return end
                     local AbilityContainer = MainUI and MainUI:FindFirstChild("AbilityContainer")
@@ -2307,7 +2434,7 @@ local FeatureLoadout; FeatureLoadout = {
                         Debris:AddItem(Part, 0.4)
 
                         local Hitbox = workspace:GetPartsInPart(Part, SelfParams)
-                        if #Hitbox > 0 then
+                        if #Hitbox > 0 and not IsWallCheckBlocked(Killer) then
                             if FireSignal and BlockButton then
                                 FireSignal(BlockButton.MouseButton1Click)
                             elseif GetValue("OfficialGame") and UseActorAbility then
@@ -2369,7 +2496,7 @@ local FeatureLoadout; FeatureLoadout = {
 
                 if KillerAnimator then
                     KillerAnimator.AnimationPlayed:Connect(function(Track)
-                        if Players:GetPlayerFromCharacter(Killer) and string.lower(Killer.Name or "") ~= "c00lkidd" then
+                        if Players:GetPlayerFromCharacter(Killer) and not IsC00lkiddKiller(Killer) then
                             local AnimationId = tostring(Track.Animation.AnimationId or "")
                             local AnimType,KillerName = GetAnimationType(AnimationId)
 
@@ -2406,7 +2533,7 @@ local FeatureLoadout; FeatureLoadout = {
                                         ["combat initiation"] = "AutoBlockHitboxSlasher",
                                         ["combat initiation slasher"] = "AutoBlockHitboxSlasher"
                                     }
-                                    local PreviewKillerHitboxKey = PreviewKillerHitboxKeys[PreviewKillerNameLower] or ("AutoBlockHitbox" .. Killer.Name:gsub("[^%w]", ""))
+                                    local PreviewKillerHitboxKey = IsC00lkiddKiller(Killer) and "AutoBlockHitboxC00lkidd" or (PreviewKillerHitboxKeys[PreviewKillerNameLower] or ("AutoBlockHitbox" .. Killer.Name:gsub("[^%w]", "")))
                                     if AnimType:lower() == "golemslash" then
                                         PreviewKillerHitboxKey = "AutoBlockHitboxGolemslash"
                                     end
@@ -2428,7 +2555,7 @@ local FeatureLoadout; FeatureLoadout = {
                                         PreviewHitbox.CFrame = QueryHitbox.CFrame * PreviewOffset
                                     end
 
-                                    if PreviewKillerNameLower == "c00lkidd" then
+                                    if IsC00lkiddKiller(Killer) then
                                         PreviewHitbox.Size = Vector3.new(
                                             math.max(0.1, PreviewHitbox.Size.X),
                                             math.max(0.1, PreviewHitbox.Size.Y),
@@ -2449,7 +2576,7 @@ local FeatureLoadout; FeatureLoadout = {
 
                                 if GetValue("AutoBlock") and LocalCharacter and LocalCharacter:FindFirstChild("QueryHitbox") and LocalCharacter.Parent == SurvivorsFolder and MainUI:FindFirstChild("AbilityContainer") and MainUI:FindFirstChild("AbilityContainer"):FindFirstChild("Block") then
                                 local CustomHitbox = CustomHitboxes[AnimType:lower()] or CustomHitboxes[Killer.Name:lower()]
-                                for i = 1,(Killer.Name:lower() == "noli" and 11 or 10) do
+                                for i = 1,(IsC00lkiddKiller(Killer) and 9 or (Killer.Name:lower() == "noli" and 11 or 10)) do
                                     SelfParams.FilterDescendantsInstances = {LocalCharacter:FindFirstChild("QueryHitbox")}
                                     local Part = Instance.new("Part")
                                     Part.Name = "KillerDetectHitbox"
@@ -2472,7 +2599,7 @@ local FeatureLoadout; FeatureLoadout = {
                                         ["combat initiation"] = "AutoBlockHitboxSlasher",
                                         ["combat initiation slasher"] = "AutoBlockHitboxSlasher"
                                     }
-                                    local KillerHitboxKey = KillerHitboxKeys[KillerNameLower] or ("AutoBlockHitbox" .. Killer.Name:gsub("[^%w]", ""))
+                                    local KillerHitboxKey = IsC00lkiddKiller(Killer) and "AutoBlockHitboxC00lkidd" or (KillerHitboxKeys[KillerNameLower] or ("AutoBlockHitbox" .. Killer.Name:gsub("[^%w]", "")))
                                     if AnimType and AnimType:lower() == "golemslash" then
                                         KillerHitboxKey = "AutoBlockHitboxGolemslash"
                                     end
@@ -2493,7 +2620,7 @@ local FeatureLoadout; FeatureLoadout = {
                                     else
                                         Part.CFrame = QueryHitbox.CFrame * DetectionOffset
                                     end
-                                    if KillerNameLower == "c00lkidd" then
+                                    if IsC00lkiddKiller(Killer) then
                                         -- Reduce only the forward reach by 2 studs while keeping the rear edge fixed.
                                         Part.Size = Vector3.new(
                                             math.max(0.1, Part.Size.X),
@@ -2511,7 +2638,7 @@ local FeatureLoadout; FeatureLoadout = {
                                     Part.Parent = Hitboxes
                                     Debris:AddItem(Part,0.4)
                                     local Hitbox = workspace:GetPartsInPart(Part,SelfParams)
-                                    if #Hitbox > 0 then
+                                    if #Hitbox > 0 and not IsWallCheckBlocked(Killer) then
                                         if FireSignal and MainUI:FindFirstChild("AbilityContainer"):FindFirstChild("Block") then
                                             FireSignal(MainUI.AbilityContainer.Block.MouseButton1Click)
                                             if GetValue("DragBlock", false) then
@@ -2740,8 +2867,8 @@ local FeatureLoadout; FeatureLoadout = {
             ["Requirement"] = "AutoBlock|DragBlock",
             ["ExtraData"] = {
                 ["MaxValue"] = 2,
-                ["MinValue"] = 0.05,
-                ["Step"] = 0.05
+                ["MinValue"] = 0.01,
+                ["Step"] = 0.01
             }
         },
         ["EnableOverride"] = {
