@@ -109,7 +109,10 @@ GameVersionForScript = "2026-10-06"
 local DragBlockBusy = false
 local DragBlockToken = 0
 local DragBlockLastFollowAt = -math.huge
-local FOLLOW_KILLER_COOLDOWN = 27
+-- Drag Block now follows the game's actual Block cooldown instead of a hardcoded timer.
+-- The value is refreshed from the Block ability UI whenever the block is used.
+local FOLLOW_KILLER_COOLDOWN = 0
+local LastKnownBlockCooldown = 0
 local CancelDragBlockFollow = nil
 
 -- Exact Helpless detection from ReplicatedStorage.Modules.Schematics.StatusEffects.Helpless.
@@ -191,6 +194,46 @@ local function IsWallCheckBlocked(Killer)
     return true
 end
 
+-- Read the game's current Block cooldown from the Block ability UI.
+-- Different game versions can expose it as an attribute or as a countdown label,
+-- so support both without changing the game's Block cooldown itself.
+local function UpdateDragBlockCooldownFromBlockUI(BlockButton)
+    if not BlockButton then return end
+
+    local function AcceptNumber(Value)
+        local Number = tonumber(Value)
+        if Number and Number > 0 and Number < 120 then
+            LastKnownBlockCooldown = Number
+            FOLLOW_KILLER_COOLDOWN = Number
+            return true
+        end
+        return false
+    end
+
+    for _, AttributeName in {"Cooldown", "CooldownTime", "CooldownDuration", "Duration"} do
+        if AcceptNumber(BlockButton:GetAttribute(AttributeName)) then
+            return
+        end
+    end
+
+    for _, Descendant in BlockButton:GetDescendants() do
+        for _, AttributeName in {"Cooldown", "CooldownTime", "CooldownDuration", "Duration", "Time"} do
+            if AcceptNumber(Descendant:GetAttribute(AttributeName)) then
+                return
+            end
+        end
+
+        if Descendant:IsA("TextLabel") or Descendant:IsA("TextButton") then
+            local Name = string.lower(Descendant.Name or "")
+            local Text = tostring(Descendant.Text or "")
+            local Number = tonumber(Text:match("(%d+%.?%d*)"))
+            if Number and (Name:find("cooldown", 1, true) or Name:find("cd", 1, true)) then
+                if AcceptNumber(Number) then return end
+            end
+        end
+    end
+end
+
 -- Normal Drag Block only.  Cooldown is recorded when a valid follow trigger
 -- starts, so repeated ABH/sound callbacks cannot restart it early.
 local function DragBlockAttackingKiller(Killer)
@@ -200,7 +243,11 @@ local function DragBlockAttackingKiller(Killer)
     -- Existing Drag Block cooldowns continue normally during Helpless.
     if IsHelplessActive() then return end
     local Now = time()
-    if Now - DragBlockLastFollowAt < FOLLOW_KILLER_COOLDOWN then return end
+    local CurrentBlockCooldown = LastKnownBlockCooldown
+    if CurrentBlockCooldown <= 0 then
+        CurrentBlockCooldown = FOLLOW_KILLER_COOLDOWN
+    end
+    if CurrentBlockCooldown > 0 and Now - DragBlockLastFollowAt < CurrentBlockCooldown then return end
     if not Killer or not Killer.Parent then return end
 
     local Character = LocalCharacter
@@ -211,6 +258,9 @@ local function DragBlockAttackingKiller(Killer)
     local ContextActionService = game:GetService("ContextActionService")
     local Players = game:GetService("Players")
     local MovementActionName = "AutoBlockFollowMovementOverride"
+    local AbilityContainer = MainUI and MainUI:FindFirstChild("AbilityContainer")
+    local BlockButton = AbilityContainer and AbilityContainer:FindFirstChild("Block")
+    UpdateDragBlockCooldownFromBlockUI(BlockButton)
     -- Normal Drag Block uses the regular stop-distance setting.
     local KillerNameLower = string.lower(Killer.Name or "")
     local STOP_DISTANCE = tonumber(GetValue("DragBlockStopDistance")) or (KillerNameLower:find("c00lkidd", 1, true) and 2 or 3)
@@ -2331,6 +2381,10 @@ local FeatureLoadout; FeatureLoadout = {
                         if #Hitbox > 0 and not IsWallCheckBlocked(Killer) then
                             if FireSignal and BlockButton then
                                 FireSignal(BlockButton.MouseButton1Click)
+                            task.defer(function()
+                                task.wait()
+                                UpdateDragBlockCooldownFromBlockUI(BlockButton)
+                            end)
                             elseif GetValue("OfficialGame") and UseActorAbility then
                                 UseActorAbility:FireServer("UseActorAbility", {"Block"})
                             elseif UseActorAbility then
@@ -2437,6 +2491,10 @@ local FeatureLoadout; FeatureLoadout = {
                         if #Hitbox > 0 and not IsWallCheckBlocked(Killer) then
                             if FireSignal and BlockButton then
                                 FireSignal(BlockButton.MouseButton1Click)
+                            task.defer(function()
+                                task.wait()
+                                UpdateDragBlockCooldownFromBlockUI(BlockButton)
+                            end)
                             elseif GetValue("OfficialGame") and UseActorAbility then
                                 UseActorAbility:FireServer("UseActorAbility", {"Block"})
                             elseif UseActorAbility then
@@ -2576,7 +2634,7 @@ local FeatureLoadout; FeatureLoadout = {
 
                                 if GetValue("AutoBlock") and LocalCharacter and LocalCharacter:FindFirstChild("QueryHitbox") and LocalCharacter.Parent == SurvivorsFolder and MainUI:FindFirstChild("AbilityContainer") and MainUI:FindFirstChild("AbilityContainer"):FindFirstChild("Block") then
                                 local CustomHitbox = CustomHitboxes[AnimType:lower()] or CustomHitboxes[Killer.Name:lower()]
-                                for i = 1,(IsC00lkiddKiller(Killer) and 9 or (Killer.Name:lower() == "noli" and 11 or 10)) do
+                                for i = 1,(IsC00lkiddKiller(Killer) and 9 or (Killer.Name:lower() == "noli" and 10 or 10)) do
                                     SelfParams.FilterDescendantsInstances = {LocalCharacter:FindFirstChild("QueryHitbox")}
                                     local Part = Instance.new("Part")
                                     Part.Name = "KillerDetectHitbox"
@@ -2641,6 +2699,10 @@ local FeatureLoadout; FeatureLoadout = {
                                     if #Hitbox > 0 and not IsWallCheckBlocked(Killer) then
                                         if FireSignal and MainUI:FindFirstChild("AbilityContainer"):FindFirstChild("Block") then
                                             FireSignal(MainUI.AbilityContainer.Block.MouseButton1Click)
+                                            task.defer(function()
+                                                task.wait()
+                                                UpdateDragBlockCooldownFromBlockUI(MainUI.AbilityContainer.Block)
+                                            end)
                                             if GetValue("DragBlock", false) then
                                                 DragBlockAttackingKiller(Killer)
                                             end
