@@ -113,15 +113,93 @@ local DragBlockLastFollowAt = -math.huge
 -- The value is refreshed from the Block ability UI whenever the block is used.
 local FOLLOW_KILLER_COOLDOWN = 0
 local LastKnownBlockCooldown = 0
+local BlockCooldownUntil = 0
 local CancelDragBlockFollow = nil
+
+-- Fail closed when the Block UI indicates an active cooldown. Drag Block must
+-- never start merely because an attack was detected while Block is unavailable.
+local function IsBlockCooldownActive(BlockButton)
+    if not BlockButton then return true end
+    if not BlockButton.Visible or not BlockButton.Active or BlockButton.Interactable == false then return true end
+    if os.clock() < BlockCooldownUntil then return true end
+
+    for _, AttributeName in {"CooldownRemaining", "RemainingCooldown", "CooldownLeft"} do
+        local Remaining = tonumber(BlockButton:GetAttribute(AttributeName))
+        if Remaining and Remaining > 0 then return true end
+    end
+
+    for _, Object in BlockButton:GetDescendants() do
+        if not Object:IsA("GuiObject") or not Object.Visible then continue end
+        local Name = string.lower(Object.Name or "")
+        local IsCooldownObject = Name:find("cooldown", 1, true)
+            or Name == "cd" or Name:find("countdown", 1, true)
+            or Name:find("remaining", 1, true)
+        if IsCooldownObject then
+            if Object:IsA("TextLabel") or Object:IsA("TextButton") then
+                local Remaining = tonumber(tostring(Object.Text or ""):match("(%d+%.?%d*)"))
+                if Remaining and Remaining > 0 then return true end
+            elseif Object:IsA("Frame") or Object:IsA("ImageLabel") or Object:IsA("ImageButton") then
+                -- Only treat it as cooldown if it has a numeric countdown, or
+                -- the button itself is disabled; plain decorative overlays vary by skin.
+                for _, Child in Object:GetDescendants() do
+                    if (Child:IsA("TextLabel") or Child:IsA("TextButton")) and Child.Visible then
+                        local Remaining = tonumber(tostring(Child.Text or ""):match("(%d+%.?%d*)"))
+                        if Remaining and Remaining > 0 then return true end
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
+local function MarkBlockUsed(BlockButton)
+    UpdateDragBlockCooldownFromBlockUI(BlockButton)
+    local Duration = math.max(LastKnownBlockCooldown, FOLLOW_KILLER_COOLDOWN)
+    if Duration > 0 then
+        BlockCooldownUntil = math.max(BlockCooldownUntil, os.clock() + Duration)
+    end
+    task.delay(0.08, function()
+        if BlockButton and BlockButton.Parent then
+            UpdateDragBlockCooldownFromBlockUI(BlockButton)
+            local UpdatedDuration = math.max(LastKnownBlockCooldown, FOLLOW_KILLER_COOLDOWN)
+            if UpdatedDuration > 0 then
+                BlockCooldownUntil = math.max(BlockCooldownUntil, os.clock() + UpdatedDuration)
+            end
+        end
+    end)
+end
 
 -- Exact Helpless detection from ReplicatedStorage.Modules.Schematics.StatusEffects.Helpless.
 -- The game's Applied handler sets Character.AbilitiesDisabled = true.
 local function IsHelplessActive()
-    if not LocalCharacter or not LocalCharacter.Parent then
+    local Character = LocalCharacter
+    if not Character or not Character.Parent then
         return false
     end
-    return LocalCharacter:GetAttribute("AbilitiesDisabled") == true
+
+    -- AbilitiesDisabled is the game's primary Helpless lock, but character/UI
+    -- refreshes can briefly leave that attribute stale. Check the common status
+    -- containers as a fallback so Auto Block and Drag Block fail closed.
+    if Character:GetAttribute("AbilitiesDisabled") == true then
+        return true
+    end
+    local Humanoid = Character:FindFirstChildOfClass("Humanoid")
+    if Humanoid and Humanoid:GetAttribute("AbilitiesDisabled") == true then
+        return true
+    end
+    for _, Object in Character:GetDescendants() do
+        if string.lower(Object.Name) == "helpless" then
+            if not Object:IsA("BoolValue") or Object.Value == true then
+                return true
+            end
+        end
+    end
+    local StatusEffects = Character:FindFirstChild("StatusEffects") or Character:FindFirstChild("Statuses")
+    if StatusEffects and (StatusEffects:FindFirstChild("Helpless") or StatusEffects:FindFirstChild("helpless")) then
+        return true
+    end
+    return false
 end
 
 -- Patch 199: WallCheck prevents Auto Block and Drag Block from triggering
@@ -242,7 +320,7 @@ local function DragBlockAttackingKiller(Killer)
     -- A new Drag Block may not start while Helpless is active.
     -- Existing Drag Block cooldowns continue normally during Helpless.
     if IsHelplessActive() then return end
-    local Now = time()
+    local Now = os.clock()
     local CurrentBlockCooldown = LastKnownBlockCooldown
     if CurrentBlockCooldown <= 0 then
         CurrentBlockCooldown = FOLLOW_KILLER_COOLDOWN
@@ -260,7 +338,12 @@ local function DragBlockAttackingKiller(Killer)
     local MovementActionName = "AutoBlockFollowMovementOverride"
     local AbilityContainer = MainUI and MainUI:FindFirstChild("AbilityContainer")
     local BlockButton = AbilityContainer and AbilityContainer:FindFirstChild("Block")
+    if not BlockButton or not BlockButton:IsA("GuiButton") then return end
     UpdateDragBlockCooldownFromBlockUI(BlockButton)
+    if not BlockButton.Visible or not BlockButton.Active or BlockButton.Interactable == false
+        or IsBlockCooldownActive(BlockButton) then
+        return
+    end
     -- Normal Drag Block uses the regular stop-distance setting.
     local KillerNameLower = string.lower(Killer.Name or "")
     local STOP_DISTANCE = tonumber(GetValue("DragBlockStopDistance")) or (KillerNameLower:find("c00lkidd", 1, true) and 2 or 3)
@@ -2381,10 +2464,7 @@ local FeatureLoadout; FeatureLoadout = {
                         if #Hitbox > 0 and not IsWallCheckBlocked(Killer) then
                             if FireSignal and BlockButton then
                                 FireSignal(BlockButton.MouseButton1Click)
-                            task.defer(function()
-                                task.wait()
-                                UpdateDragBlockCooldownFromBlockUI(BlockButton)
-                            end)
+                                MarkBlockUsed(BlockButton)
                             elseif GetValue("OfficialGame") and UseActorAbility then
                                 UseActorAbility:FireServer("UseActorAbility", {"Block"})
                             elseif UseActorAbility then
@@ -2491,10 +2571,7 @@ local FeatureLoadout; FeatureLoadout = {
                         if #Hitbox > 0 and not IsWallCheckBlocked(Killer) then
                             if FireSignal and BlockButton then
                                 FireSignal(BlockButton.MouseButton1Click)
-                            task.defer(function()
-                                task.wait()
-                                UpdateDragBlockCooldownFromBlockUI(BlockButton)
-                            end)
+                                MarkBlockUsed(BlockButton)
                             elseif GetValue("OfficialGame") and UseActorAbility then
                                 UseActorAbility:FireServer("UseActorAbility", {"Block"})
                             elseif UseActorAbility then
@@ -2699,11 +2776,8 @@ local FeatureLoadout; FeatureLoadout = {
                                     if #Hitbox > 0 and not IsWallCheckBlocked(Killer) then
                                         if FireSignal and MainUI:FindFirstChild("AbilityContainer"):FindFirstChild("Block") then
                                             FireSignal(MainUI.AbilityContainer.Block.MouseButton1Click)
-                                            task.defer(function()
-                                                task.wait()
-                                                UpdateDragBlockCooldownFromBlockUI(MainUI.AbilityContainer.Block)
-                                            end)
-                                            if GetValue("DragBlock", false) then
+                                            MarkBlockUsed(MainUI.AbilityContainer.Block)
+                                            if GetValue("DragBlock", false) and not IsHelplessActive() then
                                                 DragBlockAttackingKiller(Killer)
                                             end
                                             break
@@ -2714,7 +2788,7 @@ local FeatureLoadout; FeatureLoadout = {
                                             UseActorAbility:FireServer("UseActorAbility","Block")
                                             UseActorAbility:FireServer("UseActorAbility",{"Block"})
                                         end
-                                        if GetValue("DragBlock", false) then
+                                        if GetValue("DragBlock", false) and not IsHelplessActive() then
                                             DragBlockAttackingKiller(Killer)
                                         end
                                         break
@@ -4193,6 +4267,82 @@ local FeatureLoadout; FeatureLoadout = {
                     end
                 else
                     self.Instance.Value = workspace:GetAttribute("DisableAbilityCooldownSelf")
+                end
+            end
+        },
+        ["DragBlockReadyIndicator"] = {
+            ["DisplayDescription"] = "Host-exclusive status indicator for whether the Block ability—and therefore Drag Block—is ready to trigger",
+            ["DisplayTitle"] = "Drag Ready Indicator (Host Exclusive)",
+            ["LayoutOrder"] = 14,
+            ["Savable"] = false,
+            ["InstanceType"] = "BoolValue",
+            ["DefaultInstanceValue"] = false,
+            ["Requirement"] = "PrivateServerOwner",
+            ["ScriptFunction"] = function(self, Value)
+                local Existing = PlayerGui and PlayerGui:FindFirstChild("DragBlockReadyIndicatorGui")
+                if not Value then
+                    if Existing then Existing:Destroy() end
+                    return
+                end
+                if Existing then return end
+                local ScreenGui = Instance.new("ScreenGui")
+                ScreenGui.Name = "DragBlockReadyIndicatorGui"
+                ScreenGui.ResetOnSpawn = false
+                ScreenGui.DisplayOrder = 1000
+                local Label = Instance.new("TextLabel")
+                Label.Name = "Status"
+                Label.AnchorPoint = Vector2.new(0.5, 0)
+                Label.Position = UDim2.new(0.5, 0, 0, 80)
+                Label.Size = UDim2.new(0, 300, 0, 34)
+                Label.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+                Label.BackgroundTransparency = 0.15
+                Label.BorderSizePixel = 0
+                Label.Font = Enum.Font.GothamBold
+                Label.TextSize = 16
+                Label.TextColor3 = Color3.fromRGB(220, 220, 220)
+                Label.Text = "DRAG: CHECKING..."
+                Label.Parent = ScreenGui
+                ScreenGui.Parent = PlayerGui
+            end,
+            ["OnLoop"] = function(self)
+                local ScreenGui = PlayerGui and PlayerGui:FindFirstChild("DragBlockReadyIndicatorGui")
+                local Label = ScreenGui and ScreenGui:FindFirstChild("Status")
+                if not Label then return end
+                if not GetValue("DragBlockReadyIndicator", false) then
+                    ScreenGui:Destroy()
+                    return
+                end
+
+                -- Helpless disables abilities even if the Block button's UI looks available.
+                if IsHelplessActive() then
+                    Label.Text = "DRAG: NOT READY (HELPLESS)"
+                    Label.TextColor3 = Color3.fromRGB(255, 90, 90)
+                    return
+                end
+
+                local AbilityContainer = MainUI and MainUI:FindFirstChild("AbilityContainer")
+                local BlockButton = AbilityContainer and AbilityContainer:FindFirstChild("Block")
+                if not BlockButton or not BlockButton:IsA("GuiButton") or not BlockButton.Visible or not BlockButton.Active then
+                    Label.Text = "DRAG: NOT READY (BLOCK UNAVAILABLE)"
+                    Label.TextColor3 = Color3.fromRGB(255, 90, 90)
+                    return
+                end
+                if BlockButton.Interactable == false then
+                    Label.Text = "DRAG: NOT READY (BLOCK LOCKED)"
+                    Label.TextColor3 = Color3.fromRGB(255, 170, 70)
+                    return
+                end
+
+                -- Use the exact same cooldown gate as Drag Block itself, including
+                -- the locally tracked cooldown and the game's visible countdown.
+                local OnCooldown = IsBlockCooldownActive(BlockButton)
+
+                if OnCooldown then
+                    Label.Text = "DRAG: NOT READY (BLOCK COOLDOWN)"
+                    Label.TextColor3 = Color3.fromRGB(255, 90, 90)
+                else
+                    Label.Text = "DRAG: READY TO TRIGGER"
+                    Label.TextColor3 = Color3.fromRGB(90, 255, 130)
                 end
             end
         },
