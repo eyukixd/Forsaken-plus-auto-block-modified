@@ -1,3 +1,6 @@
+-- Patch 309: Relax false-positive cooldown UI detection and allow Drag V2 to reach check 7.
+-- Patch 305: Slasher/Sixer Drag V2 uses a 1.75x normal ABH hitbox on check 7.
+-- Patch 303: reliable hitbox visualization folder and nil-safe ShowHitboxes setting.
 -- Patch 191 base: Restore loading from Patch 189.
 -- Forsaken Plus Made by Naiko Scripts --
 -- Copies of this script must contain the original credits and be open source --
@@ -67,6 +70,28 @@ KillersFolder = PlayersFolder and PlayersFolder:FindFirstChild("Killers")
 SurvivorsFolder = PlayersFolder and PlayersFolder:FindFirstChild("Survivors")
 RagdollsFolder = workspace:FindFirstChild("Ragdolls")
 Hitboxes = workspace:FindFirstChild("Hitboxes")
+-- Patch 303: refresh/recreate the visualization folder if the game replaces it.
+local function GetHitboxesFolder()
+    local CurrentFolder = workspace:FindFirstChild("Hitboxes")
+    if not CurrentFolder then
+        CurrentFolder = Instance.new("Folder")
+        CurrentFolder.Name = "Hitboxes"
+        CurrentFolder.Parent = workspace
+    end
+    Hitboxes = CurrentFolder
+    return CurrentFolder
+end
+
+local function AreHitboxesShown()
+    -- The settings object may load after the detector starts; don't error if it's missing.
+    local Settings = PlayerData and PlayerData:FindFirstChild("Settings")
+    local Setting = Settings and Settings:FindFirstChild("ShowHitboxes", true)
+    if Setting and Setting:IsA("BoolValue") then
+        ShowHitboxesSetting = Setting
+        return Setting.Value
+    end
+    return ShowHitboxesSetting ~= nil and ShowHitboxesSetting.Value == true
+end
 MarketplaceService = game:GetService("MarketplaceService")
 ReplicatedStorage = game:GetService("ReplicatedStorage")
 UserInputService = game:GetService("UserInputService")
@@ -102,6 +127,8 @@ IgnoreKeybinds = {"W", "A", "S", "D"}
 GameVersionForScript = "2026-10-06"
 -- Patch 198: Drag Block Helpless/cooldown handling.
 -- Patch 199: Added WallCheck gate for Auto Block and Drag Block.
+-- Patch 302: Allow both Drag Block and Drag V2 follow calls immediately after their own successful Block trigger, while preserving cooldown checks for ordinary calls.
+-- Patch 307: Enforce Block cooldown before firing and retain the follow throttle.
 -- Physically walks toward the killer while Auto Block is active.
 -- Helpless pauses an existing follow instead of resetting/cancelling it.
 -- New Drag Block triggers are rejected during Helpless; cooldown time still advances.
@@ -113,93 +140,15 @@ local DragBlockLastFollowAt = -math.huge
 -- The value is refreshed from the Block ability UI whenever the block is used.
 local FOLLOW_KILLER_COOLDOWN = 0
 local LastKnownBlockCooldown = 0
-local BlockCooldownUntil = 0
 local CancelDragBlockFollow = nil
-
--- Fail closed when the Block UI indicates an active cooldown. Drag Block must
--- never start merely because an attack was detected while Block is unavailable.
-local function IsBlockCooldownActive(BlockButton)
-    if not BlockButton then return true end
-    if not BlockButton.Visible or not BlockButton.Active or BlockButton.Interactable == false then return true end
-    if os.clock() < BlockCooldownUntil then return true end
-
-    for _, AttributeName in {"CooldownRemaining", "RemainingCooldown", "CooldownLeft"} do
-        local Remaining = tonumber(BlockButton:GetAttribute(AttributeName))
-        if Remaining and Remaining > 0 then return true end
-    end
-
-    for _, Object in BlockButton:GetDescendants() do
-        if not Object:IsA("GuiObject") or not Object.Visible then continue end
-        local Name = string.lower(Object.Name or "")
-        local IsCooldownObject = Name:find("cooldown", 1, true)
-            or Name == "cd" or Name:find("countdown", 1, true)
-            or Name:find("remaining", 1, true)
-        if IsCooldownObject then
-            if Object:IsA("TextLabel") or Object:IsA("TextButton") then
-                local Remaining = tonumber(tostring(Object.Text or ""):match("(%d+%.?%d*)"))
-                if Remaining and Remaining > 0 then return true end
-            elseif Object:IsA("Frame") or Object:IsA("ImageLabel") or Object:IsA("ImageButton") then
-                -- Only treat it as cooldown if it has a numeric countdown, or
-                -- the button itself is disabled; plain decorative overlays vary by skin.
-                for _, Child in Object:GetDescendants() do
-                    if (Child:IsA("TextLabel") or Child:IsA("TextButton")) and Child.Visible then
-                        local Remaining = tonumber(tostring(Child.Text or ""):match("(%d+%.?%d*)"))
-                        if Remaining and Remaining > 0 then return true end
-                    end
-                end
-            end
-        end
-    end
-    return false
-end
-
-local function MarkBlockUsed(BlockButton)
-    UpdateDragBlockCooldownFromBlockUI(BlockButton)
-    local Duration = math.max(LastKnownBlockCooldown, FOLLOW_KILLER_COOLDOWN)
-    if Duration > 0 then
-        BlockCooldownUntil = math.max(BlockCooldownUntil, os.clock() + Duration)
-    end
-    task.delay(0.08, function()
-        if BlockButton and BlockButton.Parent then
-            UpdateDragBlockCooldownFromBlockUI(BlockButton)
-            local UpdatedDuration = math.max(LastKnownBlockCooldown, FOLLOW_KILLER_COOLDOWN)
-            if UpdatedDuration > 0 then
-                BlockCooldownUntil = math.max(BlockCooldownUntil, os.clock() + UpdatedDuration)
-            end
-        end
-    end)
-end
 
 -- Exact Helpless detection from ReplicatedStorage.Modules.Schematics.StatusEffects.Helpless.
 -- The game's Applied handler sets Character.AbilitiesDisabled = true.
 local function IsHelplessActive()
-    local Character = LocalCharacter
-    if not Character or not Character.Parent then
+    if not LocalCharacter or not LocalCharacter.Parent then
         return false
     end
-
-    -- AbilitiesDisabled is the game's primary Helpless lock, but character/UI
-    -- refreshes can briefly leave that attribute stale. Check the common status
-    -- containers as a fallback so Auto Block and Drag Block fail closed.
-    if Character:GetAttribute("AbilitiesDisabled") == true then
-        return true
-    end
-    local Humanoid = Character:FindFirstChildOfClass("Humanoid")
-    if Humanoid and Humanoid:GetAttribute("AbilitiesDisabled") == true then
-        return true
-    end
-    for _, Object in Character:GetDescendants() do
-        if string.lower(Object.Name) == "helpless" then
-            if not Object:IsA("BoolValue") or Object.Value == true then
-                return true
-            end
-        end
-    end
-    local StatusEffects = Character:FindFirstChild("StatusEffects") or Character:FindFirstChild("Statuses")
-    if StatusEffects and (StatusEffects:FindFirstChild("Helpless") or StatusEffects:FindFirstChild("helpless")) then
-        return true
-    end
-    return false
+    return LocalCharacter:GetAttribute("AbilitiesDisabled") == true
 end
 
 -- Patch 199: WallCheck prevents Auto Block and Drag Block from triggering
@@ -312,20 +261,84 @@ local function UpdateDragBlockCooldownFromBlockUI(BlockButton)
     end
 end
 
+-- Patch 307: gate the actual ABH trigger before attempting to activate Block.
+-- BlockJustTriggered is only for the one follow associated with a real trigger;
+-- it must not let later hitbox checks fire Block again while its UI is cooling down.
+local function IsDragBlockCooldownActive(BlockButton)
+    if not BlockButton then return true end
+    if BlockButton:GetAttribute("OnCooldown") == true
+        or BlockButton:GetAttribute("CooldownActive") == true
+        or BlockButton:GetAttribute("Disabled") == true then
+        return true
+    end
+
+    for _, Descendant in BlockButton:GetDescendants() do
+        local Name = string.lower(Descendant.Name or "")
+        if Descendant:GetAttribute("OnCooldown") == true
+            or Descendant:GetAttribute("CooldownActive") == true then
+            return true
+        end
+        if (Descendant:IsA("TextLabel") or Descendant:IsA("TextButton"))
+            and (Name:find("cooldown", 1, true) or Name == "cd") then
+            local Remaining = tonumber(tostring(Descendant.Text or ""):match("(%d+%.?%d*)"))
+            if Remaining and Remaining > 0 then return true end
+        end
+    end
+    return false
+end
+
 -- Normal Drag Block only.  Cooldown is recorded when a valid follow trigger
 -- starts, so repeated ABH/sound callbacks cannot restart it early.
-local function DragBlockAttackingKiller(Killer)
-    if DragBlockBusy or not GetValue("DragBlock", false) then return end
+local function DragBlockAttackingKiller(Killer, FeatureName, BlockJustTriggered)
+    FeatureName = FeatureName or "DragBlock"
+    if DragBlockBusy or not GetValue(FeatureName, false) then return end
     if IsWallCheckBlocked(Killer) then return end
-    -- A new Drag Block may not start while Helpless is active.
-    -- Existing Drag Block cooldowns continue normally during Helpless.
+    -- A new follow may not start while Helpless is active.
     if IsHelplessActive() then return end
-    local Now = os.clock()
+    local AbilityContainer = MainUI and MainUI:FindFirstChild("AbilityContainer")
+    local BlockButton = AbilityContainer and AbilityContainer:FindFirstChild("Block")
+    if not BlockButton then return end
+    UpdateDragBlockCooldownFromBlockUI(BlockButton)
+
+    -- Preserve this patch's existing Block UI/cooldown checks for normal Drag Block.
+    -- Drag V2 is invoked immediately after a successful fourth ABH check, so its
+    -- just-triggered Block cooldown UI must not reject that same follow request.
+    if not BlockJustTriggered then
+        if BlockButton:GetAttribute("OnCooldown") == true
+            or BlockButton:GetAttribute("CooldownActive") == true
+            or BlockButton:GetAttribute("Disabled") == true
+            or BlockButton.Active == false then
+            return
+        end
+        for _, Descendant in BlockButton:GetDescendants() do
+            local Name = string.lower(Descendant.Name or "")
+            if Descendant:GetAttribute("OnCooldown") == true
+                or Descendant:GetAttribute("CooldownActive") == true
+                or ((Name:find("cooldown", 1, true) or Name == "cd")
+                    and Descendant:IsA("GuiObject") and Descendant.Visible) then
+                return
+            end
+            if (Descendant:IsA("TextLabel") or Descendant:IsA("TextButton"))
+                and (Name:find("cooldown", 1, true) or Name == "cd") then
+                local Remaining = tonumber(tostring(Descendant.Text or ""):match("(%d+%.?%d*)"))
+                if Remaining and Remaining > 0 then return end
+            end
+        end
+    end
+
+    local Now = time()
     local CurrentBlockCooldown = LastKnownBlockCooldown
     if CurrentBlockCooldown <= 0 then
         CurrentBlockCooldown = FOLLOW_KILLER_COOLDOWN
     end
-    if CurrentBlockCooldown > 0 and Now - DragBlockLastFollowAt < CurrentBlockCooldown then return end
+    -- Patch 306: BlockJustTriggered only bypasses the UI's newly-started
+    -- cooldown state; it must NOT bypass the reader-based follow throttle.
+    -- This allows the first valid follow immediately, then prevents both
+    -- Drag Block and Drag V2 from retriggering until the learned cooldown ends.
+    if CurrentBlockCooldown > 0
+        and Now - DragBlockLastFollowAt < CurrentBlockCooldown then
+        return
+    end
     if not Killer or not Killer.Parent then return end
 
     local Character = LocalCharacter
@@ -333,24 +346,15 @@ local function DragBlockAttackingKiller(Killer)
     local Root = LocalRoot
     local KillerRoot = Killer:FindFirstChild("HumanoidRootPart")
     if not Character or not Humanoid or not Root or not KillerRoot then return end
+    local PathfindingService = game:GetService("PathfindingService")
     local ContextActionService = game:GetService("ContextActionService")
     local Players = game:GetService("Players")
     local MovementActionName = "AutoBlockFollowMovementOverride"
-    local AbilityContainer = MainUI and MainUI:FindFirstChild("AbilityContainer")
-    local BlockButton = AbilityContainer and AbilityContainer:FindFirstChild("Block")
-    if not BlockButton or not BlockButton:IsA("GuiButton") then return end
-    UpdateDragBlockCooldownFromBlockUI(BlockButton)
-    if not BlockButton.Visible or not BlockButton.Active or BlockButton.Interactable == false
-        or IsBlockCooldownActive(BlockButton) then
-        return
-    end
-    -- Normal Drag Block uses the regular stop-distance setting.
     local KillerNameLower = string.lower(Killer.Name or "")
     local STOP_DISTANCE = tonumber(GetValue("DragBlockStopDistance")) or (KillerNameLower:find("c00lkidd", 1, true) and 2 or 3)
-    -- Give MoveTo enough time to actually reach the configured target.
-    -- The old 0.2s timeout could end the routine before any meaningful movement occurred.
-    local HOLD_DURATION = tonumber(GetValue("DragBlockHoldDuration")) or 0.2
-    local MOVE_TIMEOUT = math.max(1.5, HOLD_DURATION + 1.0)
+    local FOLLOW_DURATION = tonumber(GetValue("DragBlockHoldDuration")) or 0.2
+    local WALK_DISTANCE_ONCE = 3
+    local MOVE_TIMEOUT = math.max(1.5, FOLLOW_DURATION + 1.0)
 
     local function GetFlatDistance()
         if not Root or not Root.Parent or not KillerRoot or not KillerRoot.Parent then
@@ -359,11 +363,9 @@ local function DragBlockAttackingKiller(Killer)
         local Delta = Vector3.new(KillerRoot.Position.X - Root.Position.X, 0, KillerRoot.Position.Z - Root.Position.Z)
         return Delta.Magnitude
     end
-    -- Start cooldown only after a valid follow trigger has been accepted.
-    -- This timestamp cannot be shortened by later attack callbacks.
-    DragBlockLastFollowAt = Now
-    if GetFlatDistance() <= STOP_DISTANCE then return end
 
+    if GetFlatDistance() <= STOP_DISTANCE then return end
+    DragBlockLastFollowAt = Now
     DragBlockBusy = true
     DragBlockToken += 1
     local Token = DragBlockToken
@@ -371,10 +373,8 @@ local function DragBlockAttackingKiller(Killer)
     local OriginalJumpPower = Humanoid.JumpPower
     local OriginalJumpHeight = Humanoid.JumpHeight
     local OriginalAutoRotate = Humanoid.AutoRotate
-
-    -- Disable Roblox's PlayerModule controls as well as sinking actions.
-    -- This prevents the mobile thumbstick from mixing with Humanoid:MoveTo().
     local PlayerControls
+
     pcall(function()
         local PlayerScripts = Players.LocalPlayer:FindFirstChildOfClass("PlayerScripts")
         local PlayerModule = PlayerScripts and PlayerScripts:FindFirstChild("PlayerModule")
@@ -390,8 +390,6 @@ local function DragBlockAttackingKiller(Killer)
     local function SinkMovementInput()
         return Enum.ContextActionResult.Sink
     end
-
-    -- Sink keyboard, controller, mobile movement, jump, and autorun inputs.
     pcall(function()
         ContextActionService:BindActionAtPriority(
             MovementActionName,
@@ -407,46 +405,19 @@ local function DragBlockAttackingKiller(Killer)
         )
     end)
 
-    -- Use Humanoid:MoveTo for real, physics-based walking toward the killer while manual movement inputs are blocked.
-    Humanoid.WalkSpeed = 27
-    Humanoid.JumpPower = 0
-    Humanoid.JumpHeight = 0
-    Humanoid.AutoRotate = false
-
-    -- Smoothly rotate the survivor toward the attacking killer while Drag Block is active.
-    -- The turn only changes rotation; movement toward the killer is still handled by Humanoid:MoveTo().
-    local SmoothLookConnection
-    local SmoothLookStarted = os.clock()
-    local SMOOTH_LOOK_DURATION = 0.4
-    local function StopSmoothLook()
-        if SmoothLookConnection then
-            SmoothLookConnection:Disconnect()
-            SmoothLookConnection = nil
-        end
-    end
-
-    -- There must be one cleanup path for both the render loop and the
-    -- movement worker.  The render loop can reach the stop distance before
-    -- MoveToFinished fires, and the worker can finish for another reason.
     local Finished = false
-    local function FinishDragBlock()
+    local function FinishDragBlock(ReachedStopDistance)
         if Finished then return end
         Finished = true
+        if ReachedStopDistance then
+            FOLLOW_DURATION = 0
+        end
         if Token == DragBlockToken then
             DragBlockToken += 1
         end
-        StopSmoothLook()
         if Humanoid and Humanoid.Parent then
             pcall(function()
-                if Root and Root.Parent then
-                    -- Immediately cancel any active MoveTo target so the
-                    -- survivor cannot continue walking after reaching the
-                    -- configured Stop Near Killer distance.
-                    Humanoid:MoveTo(Root.Position)
-                    Humanoid:Move(Vector3.zero, true)
-                    Root.AssemblyLinearVelocity = Vector3.zero
-                    Root.AssemblyAngularVelocity = Vector3.zero
-                end
+                if Root and Root.Parent then Humanoid:MoveTo(Root.Position) end
             end)
             Humanoid.WalkSpeed = OriginalWalkSpeed
             Humanoid.JumpPower = OriginalJumpPower
@@ -454,13 +425,9 @@ local function DragBlockAttackingKiller(Killer)
             Humanoid.AutoRotate = OriginalAutoRotate
             Humanoid:Move(Vector3.zero, true)
         end
+        pcall(function() ContextActionService:UnbindAction(MovementActionName) end)
         pcall(function()
-            ContextActionService:UnbindAction(MovementActionName)
-        end)
-        pcall(function()
-            if PlayerControls then
-                PlayerControls:Enable()
-            end
+            if PlayerControls then PlayerControls:Enable() end
         end)
         DragBlockBusy = false
         if CancelDragBlockFollow == FinishDragBlock then
@@ -469,110 +436,54 @@ local function DragBlockAttackingKiller(Killer)
     end
     CancelDragBlockFollow = FinishDragBlock
 
-    SmoothLookConnection = RunService.RenderStepped:Connect(function(DeltaTime)
-        if not DragBlockBusy
-            or Token ~= DragBlockToken
-            or not GetValue("DragBlock", false)
-            or not Root
-            or not Root.Parent
-            or not KillerRoot
-            or not KillerRoot.Parent then
-            FinishDragBlock()
-            return
-        end
-
-        -- Helpless pauses Drag Block without resetting/cancelling it.
-        -- The follow resumes automatically when Helpless ends.
-        if IsHelplessActive() then
-            return
-        end
-
-        -- Keep checking for the stop distance for the whole follow, not just
-        -- during the first 0.4 seconds of smooth rotation.
-        if GetFlatDistance() <= STOP_DISTANCE then
-            FinishDragBlock()
-            return
-        end
-        if os.clock() - SmoothLookStarted >= SMOOTH_LOOK_DURATION then
-            return
-        end
-
-        local LookPosition = Vector3.new(KillerRoot.Position.X, Root.Position.Y, KillerRoot.Position.Z)
-        local LookDirection = LookPosition - Root.Position
-        if LookDirection.Magnitude > 0.05 then
-            local TargetCFrame = CFrame.lookAt(Root.Position, LookPosition)
-            local SmoothAlpha = 1 - math.exp(-12 * math.max(DeltaTime, 0))
-            Root.CFrame = Root.CFrame:Lerp(TargetCFrame, SmoothAlpha)
-        end
-    end)
+    Humanoid.WalkSpeed = 27
+    Humanoid.JumpPower = 0
+    Humanoid.JumpHeight = 0
+    Humanoid.AutoRotate = false
 
     task.spawn(function()
-        -- Walk toward the killer, stopping at the killer-specific distance.
-        local direction = Vector3.new(KillerRoot.Position.X - Root.Position.X, 0, KillerRoot.Position.Z - Root.Position.Z)
-        local distance = direction.Magnitude
-
-        -- Use horizontal distance: different rig/root heights must not prevent
-        -- the follow from stopping at the configured ground distance.
-        if distance <= STOP_DISTANCE then
-            FinishDragBlock()
+        local Started = os.clock()
+        local Direction = Vector3.new(KillerRoot.Position.X - Root.Position.X, 0, KillerRoot.Position.Z - Root.Position.Z)
+        if Direction.Magnitude <= 0.05 then
+            FinishDragBlock(false)
             return
         end
-        local TargetDistance = STOP_DISTANCE
 
-        if distance > 0.05 then
-            local startedMove = os.clock()
-            while DragBlockBusy
-                and Token == DragBlockToken
-                and GetValue("DragBlock", false)
-                and Humanoid.Health > 0
-                and Killer.Parent
-                and KillerRoot.Parent do
-                -- Helpless pauses the active follow without cancelling it.
-                -- The Drag Block cooldown remains independent and continues
-                -- advancing normally because DragBlockLastFollowAt is not reset.
-                if IsHelplessActive() then
-                    task.wait(0.08)
-                    continue
-                end
-
-                -- Only count time toward the movement timeout while the follow
-                -- is actually allowed to run. Helpless time is not consumed.
-                if os.clock() - startedMove >= MOVE_TIMEOUT then
-                    break
-                end
-
-                local CurrentDirection = Vector3.new(KillerRoot.Position.X - Root.Position.X, 0, KillerRoot.Position.Z - Root.Position.Z)
-                local CurrentDistance = CurrentDirection.Magnitude
-
-                -- Force-end as soon as the stop distance is reached.  This is
-                -- authoritative even if MoveTo has not reported completion.
-                -- Do not wait for Hold Player Duration once the stop distance
-                -- has been reached.
-                if CurrentDistance <= STOP_DISTANCE then
-                    FinishDragBlock()
-                    return
-                end
-                if CurrentDistance > TargetDistance and CurrentDistance > 0.05 then
-                    -- Aim at a point on the player's current ground plane.
-                    local TargetPosition = Vector3.new(
-                        KillerRoot.Position.X - CurrentDirection.Unit.X * TargetDistance,
-                        Root.Position.Y,
-                        KillerRoot.Position.Z - CurrentDirection.Unit.Z * TargetDistance
-                    )
-                    Humanoid:MoveTo(TargetPosition)
-                else
-                    FinishDragBlock()
-                    return
-                end
-
-                task.wait(0.08)
-            end
+        -- Issue one stable MoveTo target (as in Patch 151). Reissuing MoveTo
+        -- every frame can continually cancel the Humanoid's current movement.
+        local MoveDistance = math.max(0, GetFlatDistance() - STOP_DISTANCE)
+        MoveDistance = math.min(WALK_DISTANCE_ONCE, MoveDistance)
+        local TargetPosition = Root.Position + Direction.Unit * MoveDistance
+        if MoveDistance > 0.05 then
+            Humanoid:MoveTo(TargetPosition)
         end
 
-        -- This also handles the timeout, a disabled setting, or a destroyed
-        -- killer.  FinishDragBlock is idempotent if the render loop won the
-        -- race and already stopped the follow.
-        FinishDragBlock()
+        while DragBlockBusy
+            and Token == DragBlockToken
+            and GetValue(FeatureName, false)
+            and not IsHelplessActive()
+            and Humanoid.Health > 0
+            and Killer.Parent
+            and KillerRoot.Parent
+            and os.clock() - Started < MOVE_TIMEOUT do
+
+            local CurrentDistance = GetFlatDistance()
+            if CurrentDistance <= STOP_DISTANCE then
+                FinishDragBlock(true)
+                return
+            end
+
+            local LookPosition = Vector3.new(KillerRoot.Position.X, Root.Position.Y, KillerRoot.Position.Z)
+            if (LookPosition - Root.Position).Magnitude > 0.05 then
+                Root.CFrame = CFrame.lookAt(Root.Position, LookPosition)
+            end
+
+            if (Root.Position - TargetPosition).Magnitude <= 0.75 then
+                break
+            end
+            task.wait(0.03)
+        end
+        FinishDragBlock(GetFlatDistance() <= STOP_DISTANCE)
     end)
 end
 
@@ -2389,26 +2300,34 @@ local FeatureLoadout; FeatureLoadout = {
 
                     return false
                 end
-                -- Patch 167: C00lkidd is sound-only. Its sound watcher is isolated from
-                -- the normal animation detector so regular Auto Block remains unchanged.
-                local C00lkiddAttackSounds = {
-                    ["80516583309685"] = true,
-                    ["75330693422988"] = true,
-                    ["84307400688050"] = true,
-                    ["82221759983649"] = true,
-                    ["105516183226360"] = true,
-                    ["124234993291213"] = true,
-                    ["128195973631079"] = true
-                }
+                -- C00lkidd ABH is triggered by the M1 animation, not attack sounds.
+                local C00lkiddM1AnimationId = "121858217776572"
+                local C00lkiddM1Tracks = {}
 
-                local C00lkiddSoundConnections = {}
-                local C00lkiddSoundLastTrigger = {}
-
-                local function GetC00lkiddSoundAssetId(Sound)
-                    if not Sound or not Sound:IsA("Sound") then return nil end
-                    return tostring(Sound.SoundId or ""):match("%d+")
+                local RunC00lkiddSoundAutoBlock
+                if KillerAnimator then
+                    KillerAnimator.AnimationPlayed:Connect(function(Track)
+                        local Animation = Track and Track.Animation
+                        local AnimationId = Animation and tostring(Animation.AnimationId or ""):match("%d+")
+                        if AnimationId == C00lkiddM1AnimationId then
+                            C00lkiddM1Tracks[Track] = true
+                            Track.Stopped:Connect(function()
+                                C00lkiddM1Tracks[Track] = nil
+                            end)
+                            task.spawn(function() RunC00lkiddSoundAutoBlock(true) end)
+                        end
+                    end)
                 end
-                local function RunC00lkiddSoundAutoBlock()
+
+                local function IsC00lkiddM1Playing()
+                    for Track in pairs(C00lkiddM1Tracks) do
+                        if Track.IsPlaying then return true end
+                        C00lkiddM1Tracks[Track] = nil
+                    end
+                    return false
+                end
+
+                RunC00lkiddSoundAutoBlock = function(RequireM1Animation)
                     if not GetValue("AutoBlock") or IsHelplessActive() then return end
                     if IsWallCheckBlocked(Killer) then return end
                     if not IsC00lkiddKiller(Killer) then return end
@@ -2421,6 +2340,8 @@ local FeatureLoadout; FeatureLoadout = {
                     local KillerNameLower = Killer.Name:lower()
                     for i = 1, 9 do
                         if IsHelplessActive() or not GetValue("AutoBlock") then return end
+                        -- This specific M1 uses animation detection; other listed sounds keep audio detection.
+                        if RequireM1Animation and not IsC00lkiddM1Playing() then return end
                         SelfParams.FilterDescendantsInstances = {LocalCharacter:FindFirstChild("QueryHitbox")}
                         local Part = Instance.new("Part")
                         Part.Name = "KillerDetectHitbox"
@@ -2455,16 +2376,19 @@ local FeatureLoadout; FeatureLoadout = {
                         Part.Anchored = true
                         Part.CastShadow = false
                         Part.Material = Enum.Material.ForceField
-                        Part.Transparency = ShowHitboxesSetting.Value and 0.1 or 1
+                        Part.Transparency = AreHitboxesShown() and 0.1 or 1
 
-                        Part.Parent = Hitboxes
+                        Part.Parent = GetHitboxesFolder()
                         Debris:AddItem(Part, 0.4)
 
                         local Hitbox = workspace:GetPartsInPart(Part, SelfParams)
-                        if #Hitbox > 0 and not IsWallCheckBlocked(Killer) then
+                        if #Hitbox > 0 and not IsWallCheckBlocked(Killer) and not IsDragBlockCooldownActive(BlockButton) then
                             if FireSignal and BlockButton then
                                 FireSignal(BlockButton.MouseButton1Click)
-                                MarkBlockUsed(BlockButton)
+                            task.defer(function()
+                                task.wait()
+                                UpdateDragBlockCooldownFromBlockUI(BlockButton)
+                            end)
                             elseif GetValue("OfficialGame") and UseActorAbility then
                                 UseActorAbility:FireServer("UseActorAbility", {"Block"})
                             elseif UseActorAbility then
@@ -2472,12 +2396,30 @@ local FeatureLoadout; FeatureLoadout = {
                                 UseActorAbility:FireServer("UseActorAbility", {"Block"})
                             end
                             if GetValue("DragBlock", false) and not IsHelplessActive() then
-                                DragBlockAttackingKiller(Killer)
+                                DragBlockAttackingKiller(Killer, "DragBlock", true)
                             end
                             break
                         end
                         task.wait(0.02)
                     end
+                end
+
+                -- Keep C00lkidd's other audio detections; only 75330693422988
+                -- is excluded because it is detected through the M1 animation instead.
+                local C00lkiddAttackSounds = {
+                    ["80516583309685"] = true,
+                    ["84307400688050"] = true,
+                    ["82221759983649"] = true,
+                    ["105516183226360"] = true,
+                    ["124234993291213"] = true,
+                    ["128195973631079"] = true
+                }
+                local C00lkiddSoundConnections = {}
+                local C00lkiddSoundLastTrigger = {}
+
+                local function GetC00lkiddSoundAssetId(Sound)
+                    if not Sound or not Sound:IsA("Sound") then return nil end
+                    return tostring(Sound.SoundId or ""):match("%d+")
                 end
 
                 local function WatchC00lkiddSound(Sound)
@@ -2491,7 +2433,7 @@ local FeatureLoadout; FeatureLoadout = {
                         local Now = os.clock()
                         if C00lkiddSoundLastTrigger[Sound] and Now - C00lkiddSoundLastTrigger[Sound] < 0.08 then return end
                         C00lkiddSoundLastTrigger[Sound] = Now
-                        task.spawn(RunC00lkiddSoundAutoBlock)
+                        task.spawn(function() RunC00lkiddSoundAutoBlock(false) end)
                     end
 
                     C00lkiddSoundConnections[Sound] = Sound:GetPropertyChangedSignal("Playing"):Connect(Trigger)
@@ -2500,14 +2442,10 @@ local FeatureLoadout; FeatureLoadout = {
 
                 if IsC00lkiddKiller(Killer) then
                     for _, Descendant in Killer:GetDescendants() do
-                        if Descendant:IsA("Sound") then
-                            WatchC00lkiddSound(Descendant)
-                        end
+                        if Descendant:IsA("Sound") then WatchC00lkiddSound(Descendant) end
                     end
                     Killer.DescendantAdded:Connect(function(Descendant)
-                        if Descendant:IsA("Sound") then
-                            WatchC00lkiddSound(Descendant)
-                        end
+                        if Descendant:IsA("Sound") then WatchC00lkiddSound(Descendant) end
                     end)
                 end
 
@@ -2563,15 +2501,18 @@ local FeatureLoadout; FeatureLoadout = {
                         Part.Anchored = true
                         Part.CastShadow = false
                         Part.Material = Enum.Material.ForceField
-                        Part.Transparency = ShowHitboxesSetting.Value and 0.1 or 1
-                        Part.Parent = Hitboxes
+                        Part.Transparency = AreHitboxesShown() and 0.1 or 1
+                        Part.Parent = GetHitboxesFolder()
                         Debris:AddItem(Part, 0.4)
 
                         local Hitbox = workspace:GetPartsInPart(Part, SelfParams)
-                        if #Hitbox > 0 and not IsWallCheckBlocked(Killer) then
+                        if #Hitbox > 0 and not IsWallCheckBlocked(Killer) and not IsDragBlockCooldownActive(BlockButton) then
                             if FireSignal and BlockButton then
                                 FireSignal(BlockButton.MouseButton1Click)
-                                MarkBlockUsed(BlockButton)
+                            task.defer(function()
+                                task.wait()
+                                UpdateDragBlockCooldownFromBlockUI(BlockButton)
+                            end)
                             elseif GetValue("OfficialGame") and UseActorAbility then
                                 UseActorAbility:FireServer("UseActorAbility", {"Block"})
                             elseif UseActorAbility then
@@ -2579,7 +2520,7 @@ local FeatureLoadout; FeatureLoadout = {
                                 UseActorAbility:FireServer("UseActorAbility", {"Block"})
                             end
                             if GetValue("DragBlock", false) and not IsHelplessActive() then
-                                DragBlockAttackingKiller(Killer)
+                                DragBlockAttackingKiller(Killer, "DragBlock", true)
                             end
                             break
                         end
@@ -2631,9 +2572,20 @@ local FeatureLoadout; FeatureLoadout = {
 
                 if KillerAnimator then
                     KillerAnimator.AnimationPlayed:Connect(function(Track)
-                        if Players:GetPlayerFromCharacter(Killer) and not IsC00lkiddKiller(Killer) then
+                        if Players:GetPlayerFromCharacter(Killer) then
                             local AnimationId = tostring(Track.Animation.AnimationId or "")
+                            local NumericAnimationId = AnimationId:match("%d+")
                             local AnimType,KillerName = GetAnimationType(AnimationId)
+
+                            -- Route only C00lkidd's specified M1 animation through the
+                            -- shared ABH detector so Show ABH Hitbox displays it too.
+                            if IsC00lkiddKiller(Killer) then
+                                if NumericAnimationId == C00lkiddM1AnimationId then
+                                    AnimType = "attack"
+                                else
+                                    AnimType = nil
+                                end
+                            end
 
                             -- John Doe attack animation detected from the logged animation ID.
                             if string.lower(Killer.Name or "") == "johndoe" and (AnimationId:match("%d+") == "87347358451124" or AnimationId:match("%d+") == "121778755277919") then
@@ -2704,7 +2656,7 @@ local FeatureLoadout; FeatureLoadout = {
                                     PreviewHitbox.CastShadow = false
                                     PreviewHitbox.Material = Enum.Material.ForceField
                                     PreviewHitbox.Transparency = 0.1
-                                    PreviewHitbox.Parent = Hitboxes
+                                    PreviewHitbox.Parent = GetHitboxesFolder()
                                     Debris:AddItem(PreviewHitbox, 0.4)
                                     return
                                 end
@@ -2764,21 +2716,44 @@ local FeatureLoadout; FeatureLoadout = {
                                         )
                                         Part.CFrame = Part.CFrame * CFrame.new(0, 0, 1)
                                     end
+                                    if i == 7 and GetValue("DragV2", false) then
+                                        -- Patch 305: Drag V2 uses a 75% larger hitbox than normal ABH for Slasher/Sixer.
+                                        local DragV2KillerName = string.lower(Killer.Name):gsub("[%s_%-]", "")
+                                        if DragV2KillerName == "slasher" or DragV2KillerName == "sixer" then
+                                            Part.Size = Part.Size * 1.75
+                                            if DragV2KillerName == "slasher" then
+                                                -- Patch 308: Slasher's forward depth matches its side width for Drag V2.
+                                                Part.Size = Vector3.new(Part.Size.X, Part.Size.Y, Part.Size.X)
+                                            end
+                                        else
+                                            Part.Size = Part.Size * 1.5
+                                        end
+                                    end
                                     Part.CanCollide = false
                                     Part.Anchored = true
                                     Part.CastShadow = false
                                     Part.Material = Enum.Material.ForceField
-                                    Part.Transparency = ShowHitboxesSetting.Value and 0.1 or 1
+                                    Part.Transparency = AreHitboxesShown() and 0.1 or 1
 
-                                    Part.Parent = Hitboxes
+                                    Part.Parent = GetHitboxesFolder()
                                     Debris:AddItem(Part,0.4)
                                     local Hitbox = workspace:GetPartsInPart(Part,SelfParams)
-                                    if #Hitbox > 0 and not IsWallCheckBlocked(Killer) then
+                                    local DragV2Enabled = GetValue("DragV2", false)
+                                    local IsDragV2Check = DragV2Enabled and i == 7
+                                    -- When Drag V2 is enabled, don't let checks 1-6 break the loop before check 7.
+                                    -- Normal Auto Block still responds to earlier checks when Drag V2 is off.
+                                    local ShouldTriggerThisHitbox = (#Hitbox > 0) and (not DragV2Enabled or IsDragV2Check or GetValue("DragBlock", false))
+                                    if ShouldTriggerThisHitbox and not IsWallCheckBlocked(Killer) and not IsDragBlockCooldownActive(MainUI:FindFirstChild("AbilityContainer"):FindFirstChild("Block")) then
                                         if FireSignal and MainUI:FindFirstChild("AbilityContainer"):FindFirstChild("Block") then
                                             FireSignal(MainUI.AbilityContainer.Block.MouseButton1Click)
-                                            MarkBlockUsed(MainUI.AbilityContainer.Block)
+                                            task.defer(function()
+                                                task.wait()
+                                                UpdateDragBlockCooldownFromBlockUI(MainUI.AbilityContainer.Block)
+                                            end)
                                             if GetValue("DragBlock", false) and not IsHelplessActive() then
-                                                DragBlockAttackingKiller(Killer)
+                                                DragBlockAttackingKiller(Killer, "DragBlock", true)
+                                            elseif i == 7 and GetValue("DragV2", false) and not IsHelplessActive() then
+                                                DragBlockAttackingKiller(Killer, "DragV2", true)
                                             end
                                             break
                                         end
@@ -2789,7 +2764,9 @@ local FeatureLoadout; FeatureLoadout = {
                                             UseActorAbility:FireServer("UseActorAbility",{"Block"})
                                         end
                                         if GetValue("DragBlock", false) and not IsHelplessActive() then
-                                            DragBlockAttackingKiller(Killer)
+                                            DragBlockAttackingKiller(Killer, "DragBlock", true)
+                                        elseif i == 7 and GetValue("DragV2", false) and not IsHelplessActive() then
+                                            DragBlockAttackingKiller(Killer, "DragV2", true)
                                         end
                                         break
                                     end
@@ -2966,6 +2943,18 @@ local FeatureLoadout; FeatureLoadout = {
                 end
                 MainUI.ChildAdded:Connect(self.SetupUI)
             end
+        },
+        ["DragV2"] = {
+            ["DisplayDescription"] = "Uses the seventh Auto Block hitbox check; Slasher/Sixer use a hitbox 75% larger than normal ABH, with the basic Drag Block cooldown",
+            ["DisplayTitle"] = "Drag V2",
+            ["LayoutOrder"] = 15.9,
+            ["Savable"] = true,
+            ["InstanceType"] = "BoolValue",
+            ["DefaultInstanceValue"] = false,
+            ["ExtraData"] = {
+                ["Requirement"] = "AutoBlock"
+            },
+            ["ScriptFunction"] = function(self, Value) end
         },
         ["DragBlock"] = {
             ["DisplayDescription"] = "Follows the killer who triggered Auto Block for a short time",
@@ -4267,82 +4256,6 @@ local FeatureLoadout; FeatureLoadout = {
                     end
                 else
                     self.Instance.Value = workspace:GetAttribute("DisableAbilityCooldownSelf")
-                end
-            end
-        },
-        ["DragBlockReadyIndicator"] = {
-            ["DisplayDescription"] = "Host-exclusive status indicator for whether the Block ability—and therefore Drag Block—is ready to trigger",
-            ["DisplayTitle"] = "Drag Ready Indicator (Host Exclusive)",
-            ["LayoutOrder"] = 14,
-            ["Savable"] = false,
-            ["InstanceType"] = "BoolValue",
-            ["DefaultInstanceValue"] = false,
-            ["Requirement"] = "PrivateServerOwner",
-            ["ScriptFunction"] = function(self, Value)
-                local Existing = PlayerGui and PlayerGui:FindFirstChild("DragBlockReadyIndicatorGui")
-                if not Value then
-                    if Existing then Existing:Destroy() end
-                    return
-                end
-                if Existing then return end
-                local ScreenGui = Instance.new("ScreenGui")
-                ScreenGui.Name = "DragBlockReadyIndicatorGui"
-                ScreenGui.ResetOnSpawn = false
-                ScreenGui.DisplayOrder = 1000
-                local Label = Instance.new("TextLabel")
-                Label.Name = "Status"
-                Label.AnchorPoint = Vector2.new(0.5, 0)
-                Label.Position = UDim2.new(0.5, 0, 0, 80)
-                Label.Size = UDim2.new(0, 300, 0, 34)
-                Label.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-                Label.BackgroundTransparency = 0.15
-                Label.BorderSizePixel = 0
-                Label.Font = Enum.Font.GothamBold
-                Label.TextSize = 16
-                Label.TextColor3 = Color3.fromRGB(220, 220, 220)
-                Label.Text = "DRAG: CHECKING..."
-                Label.Parent = ScreenGui
-                ScreenGui.Parent = PlayerGui
-            end,
-            ["OnLoop"] = function(self)
-                local ScreenGui = PlayerGui and PlayerGui:FindFirstChild("DragBlockReadyIndicatorGui")
-                local Label = ScreenGui and ScreenGui:FindFirstChild("Status")
-                if not Label then return end
-                if not GetValue("DragBlockReadyIndicator", false) then
-                    ScreenGui:Destroy()
-                    return
-                end
-
-                -- Helpless disables abilities even if the Block button's UI looks available.
-                if IsHelplessActive() then
-                    Label.Text = "DRAG: NOT READY (HELPLESS)"
-                    Label.TextColor3 = Color3.fromRGB(255, 90, 90)
-                    return
-                end
-
-                local AbilityContainer = MainUI and MainUI:FindFirstChild("AbilityContainer")
-                local BlockButton = AbilityContainer and AbilityContainer:FindFirstChild("Block")
-                if not BlockButton or not BlockButton:IsA("GuiButton") or not BlockButton.Visible or not BlockButton.Active then
-                    Label.Text = "DRAG: NOT READY (BLOCK UNAVAILABLE)"
-                    Label.TextColor3 = Color3.fromRGB(255, 90, 90)
-                    return
-                end
-                if BlockButton.Interactable == false then
-                    Label.Text = "DRAG: NOT READY (BLOCK LOCKED)"
-                    Label.TextColor3 = Color3.fromRGB(255, 170, 70)
-                    return
-                end
-
-                -- Use the exact same cooldown gate as Drag Block itself, including
-                -- the locally tracked cooldown and the game's visible countdown.
-                local OnCooldown = IsBlockCooldownActive(BlockButton)
-
-                if OnCooldown then
-                    Label.Text = "DRAG: NOT READY (BLOCK COOLDOWN)"
-                    Label.TextColor3 = Color3.fromRGB(255, 90, 90)
-                else
-                    Label.Text = "DRAG: READY TO TRIGGER"
-                    Label.TextColor3 = Color3.fromRGB(90, 255, 130)
                 end
             end
         },
