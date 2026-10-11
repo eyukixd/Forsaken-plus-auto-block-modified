@@ -2738,11 +2738,13 @@ local FeatureLoadout; FeatureLoadout = {
                                     Part.Parent = GetHitboxesFolder()
                                     Debris:AddItem(Part,0.4)
                                     local Hitbox = workspace:GetPartsInPart(Part,SelfParams)
+                                    -- Auto Block can use any ABH normally. When Drag V2 is enabled by itself,
+                                    -- wait for its dedicated 7th ABH so Auto Block and Drag V2 start together there.
+                                    -- Drag Block retains its own ability to trigger on any ABH.
                                     local DragV2Enabled = GetValue("DragV2", false)
-                                    local IsDragV2Check = DragV2Enabled and i == 7
-                                    -- When Drag V2 is enabled, don't let checks 1-6 break the loop before check 7.
-                                    -- Normal Auto Block still responds to earlier checks when Drag V2 is off.
-                                    local ShouldTriggerThisHitbox = (#Hitbox > 0) and (not DragV2Enabled or IsDragV2Check or GetValue("DragBlock", false))
+                                    local DragBlockEnabled = GetValue("DragBlock", false)
+                                    local IsDragV2Check = i == 7
+                                    local ShouldTriggerThisHitbox = #Hitbox > 0 and (not DragV2Enabled or IsDragV2Check or DragBlockEnabled)
                                     if ShouldTriggerThisHitbox and not IsWallCheckBlocked(Killer) and not IsDragBlockCooldownActive(MainUI:FindFirstChild("AbilityContainer"):FindFirstChild("Block")) then
                                         if FireSignal and MainUI:FindFirstChild("AbilityContainer"):FindFirstChild("Block") then
                                             FireSignal(MainUI.AbilityContainer.Block.MouseButton1Click)
@@ -2752,7 +2754,7 @@ local FeatureLoadout; FeatureLoadout = {
                                             end)
                                             if GetValue("DragBlock", false) and not IsHelplessActive() then
                                                 DragBlockAttackingKiller(Killer, "DragBlock", true)
-                                            elseif i == 7 and GetValue("DragV2", false) and not IsHelplessActive() then
+                                            elseif GetValue("DragV2", false) and not IsHelplessActive() then
                                                 DragBlockAttackingKiller(Killer, "DragV2", true)
                                             end
                                             break
@@ -2765,7 +2767,7 @@ local FeatureLoadout; FeatureLoadout = {
                                         end
                                         if GetValue("DragBlock", false) and not IsHelplessActive() then
                                             DragBlockAttackingKiller(Killer, "DragBlock", true)
-                                        elseif i == 7 and GetValue("DragV2", false) and not IsHelplessActive() then
+                                        elseif GetValue("DragV2", false) and not IsHelplessActive() then
                                             DragBlockAttackingKiller(Killer, "DragV2", true)
                                         end
                                         break
