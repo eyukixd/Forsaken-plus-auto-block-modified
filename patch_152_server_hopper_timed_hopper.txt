@@ -2532,6 +2532,127 @@ local FeatureLoadout; FeatureLoadout = {
                     end)
                 end
 
+                -- Nosferatu audio detection for m1_whoosh (2). Use the same ABH/sound logic as C00lkidd,
+                -- but search Workspace as well because the attack sound may not be parented
+                -- directly under the killer model.
+                local NosferatuAttackSounds = {
+                    ["104910828105172"] = true
+                }
+
+                local NosferatuSoundConnections = {}
+                local NosferatuSoundLastTrigger = {}
+
+                local function GetNosferatuSoundAssetId(Sound)
+                    if not Sound or not Sound:IsA("Sound") then return nil end
+                    return tostring(Sound.SoundId or ""):match("%d+")
+                end
+
+                local function RunNosferatuSoundAutoBlock()
+                    if not GetValue("AutoBlock") or IsHelplessActive() then return end
+                    if IsWallCheckBlocked(Killer) then return end
+                    if string.lower(Killer.Name or "") ~= "nosferatu" then return end
+                    if not LocalCharacter or not LocalCharacter:FindFirstChild("QueryHitbox") or LocalCharacter.Parent ~= SurvivorsFolder then return end
+                    local AbilityContainer = MainUI and MainUI:FindFirstChild("AbilityContainer")
+                    local BlockButton = AbilityContainer and AbilityContainer:FindFirstChild("Block")
+                    if not BlockButton then return end
+
+                    local CustomHitbox = CustomHitboxes["nosferatu"]
+                    local KillerNameLower = Killer.Name:lower()
+                    for i = 1, 12 do
+                        if IsHelplessActive() or not GetValue("AutoBlock") then return end
+                        SelfParams.FilterDescendantsInstances = {LocalCharacter:FindFirstChild("QueryHitbox")}
+                        local Part = Instance.new("Part")
+                        Part.Name = "KillerDetectHitbox"
+                        Part.Color = BrickColor.new("Really black").Color
+
+                        local BaseHitboxSize = (CustomHitbox and CustomHitbox["Size"] or Vector3.new(5.2, 6, 5.65)) * 2.2
+                        local GlobalHitboxAdjustment = GetCurrentHitboxAdjustment("AutoBlockHitboxAllKiller")
+                        local IndividualHitboxAdjustment = GetCurrentHitboxAdjustment("AutoBlockHitboxNosferatu")
+                        local TotalHitboxAdjustment = GlobalHitboxAdjustment + IndividualHitboxAdjustment
+                        Part.Size = BaseHitboxSize + Vector3.new(TotalHitboxAdjustment, TotalHitboxAdjustment, TotalHitboxAdjustment)
+                        Part.Size = Vector3.new(math.max(0.1, Part.Size.X), math.max(0.1, Part.Size.Y), math.max(0.1, Part.Size.Z))
+
+                        local DetectionOffset = CustomHitbox and CustomHitbox["Offset"] or CFrame.new(0,0,-3.5)
+                        if GetValue("DragBlock", false) then
+                            Part.Size = Part.Size + Vector3.new(0,0,2)
+                            Part.CFrame = QueryHitbox.CFrame * DetectionOffset * CFrame.new(0,0,-1)
+                        else
+                            Part.CFrame = QueryHitbox.CFrame * DetectionOffset
+                        end
+
+                        Part.CanCollide = false
+                        Part.Anchored = true
+                        Part.CastShadow = false
+                        Part.Material = Enum.Material.ForceField
+                        Part.Transparency = AreHitboxesShown() and 0.1 or 1
+                        Part.Parent = GetHitboxesFolder()
+                        Debris:AddItem(Part, 0.4)
+
+                        local Hitbox = workspace:GetPartsInPart(Part, SelfParams)
+                        if #Hitbox > 0 and not IsWallCheckBlocked(Killer) and not IsDragBlockCooldownActive(BlockButton) then
+                            if FireSignal and BlockButton then
+                                FireSignal(BlockButton.MouseButton1Click)
+                            task.defer(function()
+                                task.wait()
+                                UpdateDragBlockCooldownFromBlockUI(BlockButton)
+                            end)
+                            elseif GetValue("OfficialGame") and UseActorAbility then
+                                UseActorAbility:FireServer("UseActorAbility", {"Block"})
+                            elseif UseActorAbility then
+                                UseActorAbility:FireServer("UseActorAbility", "Block")
+                                UseActorAbility:FireServer("UseActorAbility", {"Block"})
+                            end
+                            if GetValue("DragBlock", false) and not IsHelplessActive() then
+                                DragBlockAttackingKiller(Killer, "DragBlock", true)
+                            end
+                            break
+                        end
+                        task.wait(0.02)
+                    end
+                end
+
+                local function WatchNosferatuSound(Sound)
+                    if not Sound or not Sound:IsA("Sound") then return end
+                    if NosferatuSoundConnections[Sound] then return end
+
+                    local function TryWatch()
+                        local SoundId = GetNosferatuSoundAssetId(Sound)
+                        if not SoundId or not NosferatuAttackSounds[SoundId] then return end
+                        if NosferatuSoundConnections[Sound] then return end
+
+                        local function Trigger()
+                            if not Sound.Parent or not Sound.Playing then return end
+                            if not GetValue("AutoBlock") or IsHelplessActive() then return end
+                            local Now = os.clock()
+                            if NosferatuSoundLastTrigger[Sound] and Now - NosferatuSoundLastTrigger[Sound] < 0.08 then return end
+                            NosferatuSoundLastTrigger[Sound] = Now
+                            task.spawn(RunNosferatuSoundAutoBlock)
+                        end
+
+                        NosferatuSoundConnections[Sound] = Sound:GetPropertyChangedSignal("Playing"):Connect(Trigger)
+                        if Sound.Playing then Trigger() end
+                    end
+
+                    TryWatch()
+                    Sound:GetPropertyChangedSignal("SoundId"):Connect(TryWatch)
+                end
+
+                if string.lower(Killer.Name or "") == "nosferatu" then
+                    -- Match C00lkidd's watcher, while also covering sounds that are
+                    -- created outside the killer model.
+                    for _, Descendant in workspace:GetDescendants() do
+                        if Descendant:IsA("Sound") then
+                            WatchNosferatuSound(Descendant)
+                        end
+                    end
+
+                    workspace.DescendantAdded:Connect(function(Descendant)
+                        if Descendant:IsA("Sound") then
+                            WatchNosferatuSound(Descendant)
+                        end
+                    end)
+                end
+
                 if KillerAnimator then
                     KillerAnimator.AnimationPlayed:Connect(function(Track)
                         if Players:GetPlayerFromCharacter(Killer) then
