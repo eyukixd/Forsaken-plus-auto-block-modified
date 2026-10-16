@@ -119,6 +119,7 @@ local UIScale = Instance.new("UIScale")
 IsUnderground,IsFixingGenerator,WarnedAboutFilesCompatability = false,false,false
 local AutoDoAllInvincibleToken = 0
 local IsAutoDoAllGeneratorsRunning = false
+local ResetAfterAllGeneratorsTriggered = false
 local AutoDoAllPuzzleWasEnabled = nil
 OverriddenAnimations,AllAnimations,Values = {},{["Default Roblox"] = {["Idle"] = "http://www.roblox.com/asset/?id=180435571",["Walk"] = "http://www.roblox.com/asset/?id=180426354",["Run"] = "http://www.roblox.com/asset/?id=180426354"}},{}
 local ModulesOptions,LastTrack,NoliConfig,GetAnimationType,LastAnimOriginalUsed,UpdateAnim,CanPlayOverrideAnim,CurrentQTEAzure,TeleportSound,GetFunction
@@ -351,8 +352,10 @@ local function DragBlockAttackingKiller(Killer, FeatureName, BlockJustTriggered)
     local Players = game:GetService("Players")
     local MovementActionName = "AutoBlockFollowMovementOverride"
     local KillerNameLower = string.lower(Killer.Name or "")
-    local STOP_DISTANCE = tonumber(GetValue("DragBlockStopDistance")) or (KillerNameLower:find("c00lkidd", 1, true) and 2 or 3)
-    local FOLLOW_DURATION = tonumber(GetValue("DragBlockHoldDuration")) or 0.2
+    local StopDistanceSetting = FeatureName == "DragV2" and "DragV2StopDistance" or "DragBlockStopDistance"
+    local HoldDurationSetting = FeatureName == "DragV2" and "DragV2HoldDuration" or "DragBlockHoldDuration"
+    local STOP_DISTANCE = tonumber(GetValue(StopDistanceSetting)) or (KillerNameLower:find("c00lkidd", 1, true) and 2 or 3)
+    local FOLLOW_DURATION = tonumber(GetValue(HoldDurationSetting)) or 0.2
     local WALK_DISTANCE_ONCE = 3
     local MOVE_TIMEOUT = math.max(1.5, FOLLOW_DURATION + 1.0)
 
@@ -539,6 +542,14 @@ local function EnableAutoDoAllPuzzleAssist()
     if not AutoPuzzle.Value then
         AutoPuzzle.Value = true
     end
+end
+
+local function RestoreAutoDoAllPuzzleAssist()
+    local AutoPuzzle = GetValue("AutoGeneratorPuzzle", true)
+    if AutoDoAllPuzzleWasEnabled == false and AutoPuzzle then
+        AutoPuzzle.Value = false
+    end
+    AutoDoAllPuzzleWasEnabled = nil
 end
 
 -- Finds a clear interaction position around a generator.
@@ -859,14 +870,18 @@ local FeatureLoadout; FeatureLoadout = {
                 end)
             end
         },
-["ResetAfterAllGenerators"] = {
-    ["DisplayDescription"] = "Resets the player after Auto Do All Generators finishes every unfinished generator",
-    ["DisplayTitle"] = "Reset After All Generators",
-    ["LayoutOrder"] = 2.5,
-    ["Savable"] = true,
-    ["InstanceType"] = "BoolValue",
-    ["DefaultInstanceValue"] = false,
-    ["Requirement"] = "AutoDoAllGenerators"
+        ["ResetAfterAllGenerators"] = {
+    InstanceType = "BoolValue",
+    DefaultInstanceValue = false,
+    DisplayDescription = "Resets the player after Auto Do All Generators finishes every unfinished generator",
+    DisplayTitle = "Reset After All Generators",
+    LayoutOrder = 2.5,
+    Savable = true,
+    Default = false,
+    BoolValue = true,
+    ScriptFunction = function(Value)
+        Value.Value = Value.Value == true
+    end,
 },
 ["AutoDoAllGenerators"] = {
             ["DisplayDescription"] = "Teleports to each unfinished generator and automatically completes it",
@@ -879,29 +894,17 @@ local FeatureLoadout; FeatureLoadout = {
                 AutoDoAllInvincibleToken += 1
                 local Token = AutoDoAllInvincibleToken
 
-                if not Value then
-                    StopAutoDoAllInvincibility()
-                    return
-                end
-
-                if IsLocalPlayerSpectating() then
-                    return
-                end
-
-                EnableAutoDoAllPuzzleAssist()
-                local Invincible = GetValue("Invincible", true)
-                if Invincible and not Invincible.Value then
-                    Invincible.Value = true
+                if Value then
+                    task.delay(7, function()
+                        if Token == AutoDoAllInvincibleToken
+                            and GetValue("AutoDoAllGenerators")
+                            and GetValue("Invincible", true) then
+                            GetValue("Invincible", true).Value = true
+                        end
+                    end)
                 end
             end,
             ["OnLoop"] = function(self)
-                if IsLocalPlayerSpectating() then
-                    if IsAutoDoAllGeneratorsRunning then
-                        IsAutoDoAllGeneratorsRunning = false
-                    end
-                    return
-                end
-
                 if IsAutoDoAllGeneratorsRunning then
                     return
                 end
@@ -910,267 +913,153 @@ local FeatureLoadout; FeatureLoadout = {
                     return
                 end
 
-                EnableAutoDoAllPuzzleAssist()
                 IsAutoDoAllGeneratorsRunning = true
+                -- Reuse the existing generator puzzle solver while moving between generators.
+                EnableAutoDoAllPuzzleAssist()
 
                 task.spawn(function()
-                    local function IsActive()
-                        return Token == AutoDoAllInvincibleToken
-                            and GetValue("AutoDoAllGenerators") == true
-                            and not IsLocalPlayerSpectating()
-                            and GameMap
-                            and LocalCharacter
+                    local function ShouldStop()
+                        return not GetValue("AutoDoAllGenerators")
+                            or not GameMap
+                            or not LocalCharacter
+                            or not LocalCharacter.Parent
                     end
 
-                    if not IsActive() then
-                        IsAutoDoAllGeneratorsRunning = false
-                        return
-                    end
-
-                    for _, Object in GameMap:QueryDescendants("Model#Generator:has(#Main)") do
-                        if not IsActive() then
-                            break
-                        end
-
-                        local Main = Object:FindFirstChild("Main")
-                        local ProgressValue = Object:FindFirstChild("Progress")
-                        local Remotes = Object:FindFirstChild("Remotes")
-                        local RemoteEvent = Remotes and (Remotes:FindFirstChild("Progress") or Remotes:FindFirstChildOfClass("RemoteEvent"))
-
-                        if Main and ProgressValue and ProgressValue.Value < 100 then
-                            local TargetPosition = GetClearGeneratorPosition(Main)
-
-                            if TargetPosition and LocalCharacter.PivotTo then
-                                LocalCharacter:PivotTo(CFrame.new(TargetPosition))
-                                task.wait(0.15)
-                            else
-                                task.wait(0.5)
-                            end
-
-                            local GeneratorPrompt = Object:FindFirstChildWhichIsA("ProximityPrompt", true)
-                    local HasClearPosition = TargetPosition ~= nil
-
-                    if GeneratorPrompt and HasClearPosition then
-                        -- Try to open this generator from up to three positions.
-                        -- If all three attempts fail, move to another available side
-                        -- of the same generator and try again.
-                        local GeneratorOpened = false
-                        local GeneratorPositions = {}
-
-                        if Main then
-                            local GeneratorCFrame = Main.CFrame
-                            local GeneratorSize = Main.Size
-                            local CheckDistance = math.max(4.5, math.max(GeneratorSize.X, GeneratorSize.Z) * 0.5 + 3)
-
-                            -- Retry only from the left, right, or front.
-                            -- Never retry from behind the generator.
-                            GeneratorPositions = {
-                                GeneratorCFrame.Position + GeneratorCFrame.RightVector * CheckDistance,
-                                GeneratorCFrame.Position - GeneratorCFrame.RightVector * CheckDistance,
-                                GeneratorCFrame.Position + GeneratorCFrame.LookVector * CheckDistance
-                            }
-                        end
-
-                        local function TryOpenFromPosition(Position)
-                            if not IsActive() or not Position or not LocalCharacter then
-                                return false
-                            end
-
-                            if LocalCharacter.PivotTo then
-                                local SafeParams = RaycastParams.new()
-                                SafeParams.FilterType = Enum.RaycastFilterType.Exclude
-                                SafeParams.FilterDescendantsInstances = {LocalCharacter, Object}
-
-                                local OccupyingParts = workspace:GetPartBoundsInBox(
-                                    CFrame.new(Position),
-                                    Vector3.new(3, 5, 3),
-                                    SafeParams
-                                )
-
-                                for _, Part in ipairs(OccupyingParts) do
-                                    if Part.CanCollide then
-                                        return false
-                                    end
-                                end
-
-                                LocalCharacter:PivotTo(CFrame.new(Position))
-                                task.wait(0.15)
-                            end
-
-                            local BeforeProgress = ProgressValue.Value
-
-                            for _ = 1, 3 do
-                                if not IsActive()
-                                    or not LocalCharacter
-                                    or not ProgressValue.Parent then
-                                    return false
-                                end
-
-                                if typeof(fireproximityprompt) == "function" then
-                                    pcall(function()
-                                        fireproximityprompt(GeneratorPrompt, 1, true)
-                                    end)
-                                end
-
-                                pcall(function()
-                                    GeneratorPrompt:InputHoldBegin()
-                                end)
-
-                                -- Complete the generator directly as well as
-                                -- opening its prompt. This keeps Do All
-                                -- independent from Auto Generator(s).
-                                if RemoteEvent and RemoteEvent:IsA("RemoteEvent") then
-                                    pcall(function()
-                                        RemoteEvent:FireServer()
-                                    end)
-                                end
-
-                                -- Give the generator up to 3 seconds to actually respond.
-                                local WaitStart = os.clock()
-                                local LastRemoteFire = os.clock()
-                                while os.clock() - WaitStart < 3 do
-                                    if not IsActive()
-                                        or not LocalCharacter
-                                        or not ProgressValue.Parent then
-                                        pcall(function()
-                                            GeneratorPrompt:InputHoldEnd()
-                                        end)
-                                        return false
-                                    end
-
-                                    if ProgressValue.Value > BeforeProgress then
-                                        pcall(function()
-                                            GeneratorPrompt:InputHoldEnd()
-                                        end)
-                                        return true
-                                    end
-
-                                    if RemoteEvent
-                                        and RemoteEvent:IsA("RemoteEvent")
-                                        and os.clock() - LastRemoteFire >= 0.15 then
-                                        LastRemoteFire = os.clock()
-                                        pcall(function()
-                                            RemoteEvent:FireServer()
-                                        end)
-                                    end
-
-                                    task.wait(0.05)
-                                end
-
-                                pcall(function()
-                                    GeneratorPrompt:InputHoldEnd()
-                                end)
-
-                                -- Small pause before the next open attempt.
-                                task.wait(0.15)
-
-                                -- Refresh the prompt in case the generator recreated it.
-                                local RefreshedPrompt = Object:FindFirstChildWhichIsA("ProximityPrompt", true)
-                                if RefreshedPrompt then
-                                    GeneratorPrompt = RefreshedPrompt
-                                end
-                            end
-
-                            return false
-                        end
-
-                        -- First try the original clear position.
-                        GeneratorOpened = TryOpenFromPosition(TargetPosition)
-
-                        -- If three attempts fail, switch to another clear generator position.
-                        if not GeneratorOpened and #GeneratorPositions > 0 then
-                            for _, Position in ipairs(GeneratorPositions) do
-                                if (Position - TargetPosition).Magnitude > 0.5 then
-                                    local Clear = true
-
-                                    for _, Player in Players:GetPlayers() do
-                                        if Player ~= LocalPlayer and Player.Character then
-                                            local OtherRoot = Player.Character:FindFirstChild("HumanoidRootPart")
-                                            if OtherRoot and (OtherRoot.Position - Position).Magnitude < 4 then
-                                                Clear = false
-                                                break
-                                            end
-                                        end
-                                    end
-
-                                    if Clear then
-                                        GeneratorOpened = TryOpenFromPosition(Position)
-                                        if GeneratorOpened then
-                                            break
-                                        end
-                                    end
-                                end
-                            end
-                        end
-
-                        -- If the generator still did not open, skip it and let the
-                        -- next generator be processed rather than getting stuck here.
-                        if not GeneratorOpened then
-                            pcall(function()
-                                GeneratorPrompt:InputHoldEnd()
-                            end)
-                            task.wait(0.25)
-                        end
-                    end
-
-                    -- Keep the existing Auto Generator(s) solver alive long
-                    -- enough to finish the puzzle opened above.
-                    local CompletionDeadline = os.clock() + 8
-                    while IsActive()
-                        and HasClearPosition
-                        and LocalCharacter
-                        and ProgressValue.Parent
-                        and ProgressValue.Value < 100
-                        and os.clock() < CompletionDeadline do
-
-                        if IsLocalPlayerSpectating() then
-                            break
-                        end
-
-                        if RemoteEvent
-                            and RemoteEvent:IsA("RemoteEvent") then
-                            pcall(function()
-                                RemoteEvent:FireServer()
-                            end)
+                    -- Keep the original 8-second startup delay.
+                    for _ = 1, 80 do
+                        if ShouldStop() then
+                            RestoreAutoDoAllPuzzleAssist()
+                            IsAutoDoAllGeneratorsRunning = false
+                            return
                         end
                         task.wait(0.1)
                     end
 
-                            if GeneratorPrompt and HasClearPosition then
+                    -- Re-query the map after each completed generator instead of
+                    -- relying on a single snapshot of the generator list.
+                    local AllGeneratorsCompleted = false
+                    while not ShouldStop() do
+                        local NextGenerator = nil
+
+                        for _, Object in GameMap:QueryDescendants("Model#Generator:has(#Main)") do
+                            local Main = Object:FindFirstChild("Main")
+                            local ProgressValue = Object:FindFirstChild("Progress")
+                            local Remotes = Object:FindFirstChild("Remotes")
+                            local RemoteEvent = Remotes and Remotes:FindFirstChildOfClass("RemoteEvent")
+
+                            if Main and ProgressValue and ProgressValue.Value < 100 and RemoteEvent then
+                                -- A newly detected unfinished generator starts a new reset cycle.
+                                ResetAfterAllGeneratorsTriggered = false
+                                NextGenerator = {
+                                    Object = Object,
+                                    Main = Main,
+                                    ProgressValue = ProgressValue,
+                                    RemoteEvent = RemoteEvent
+                                }
+                                break
+                            end
+                        end
+
+                        -- No usable unfinished generator was found. Confirm that
+                        -- every generator is actually complete before enabling reset.
+                        if not NextGenerator then
+                            AllGeneratorsCompleted = true
+                            for _, Generator in GameMap:QueryDescendants("Model#Generator:has(#Main)") do
+                                local Progress = Generator:FindFirstChild("Progress")
+                                if Progress and Progress.Value < 100 then
+                                    AllGeneratorsCompleted = false
+                                    break
+                                end
+                            end
+                            break
+                        end
+
+                        local Object = NextGenerator.Object
+                        local Main = NextGenerator.Main
+                        local ProgressValue = NextGenerator.ProgressValue
+                        local RemoteEvent = NextGenerator.RemoteEvent
+                        local TargetPosition = GetClearGeneratorPosition(Main)
+                        local HasClearPosition = TargetPosition ~= nil
+
+                        if HasClearPosition and LocalCharacter and LocalCharacter.Parent then
+                            LocalCharacter:PivotTo(CFrame.new(TargetPosition))
+                            task.wait(0.2)
+
+                            local GeneratorPrompt = Object:FindFirstChildWhichIsA("ProximityPrompt", true)
+                            if GeneratorPrompt then
+                                pcall(function()
+                                    GeneratorPrompt:InputHoldBegin()
+                                end)
+                                task.wait(0.15)
+                            end
+
+                            -- The puzzle solver only works after PuzzleUI appears.
+                            local PuzzleWaitStarted = os.clock()
+                            while not ShouldStop()
+                                and not PlayerGui:FindFirstChild("PuzzleUI")
+                                and os.clock() - PuzzleWaitStarted < 3 do
+                                task.wait(0.1)
+                            end
+
+                            while not ShouldStop()
+                                and Object.Parent
+                                and ProgressValue.Parent
+                                and ProgressValue.Value < 100 do
+                                task.wait(1.5)
+
+                                if ShouldStop() or not Object.Parent or not ProgressValue.Parent then
+                                    break
+                                end
+
+                                -- Re-check completion immediately before firing.
+                                if ProgressValue.Value >= 100 then
+                                    break
+                                end
+
+                                local Success = pcall(function()
+                                    RemoteEvent:FireServer()
+                                end)
+                                if Success then
+                                    PlaySound("puzzleDone", {["Parent"] = Main})
+                                end
+                            end
+
+                            if GeneratorPrompt then
                                 pcall(function()
                                     GeneratorPrompt:InputHoldEnd()
                                 end)
                             end
+                        else
+                            -- If no clear interaction spot is available, allow the
+                            -- map/nearby players to change before trying the scan again.
+                            task.wait(0.5)
+                            -- Avoid a tight loop on a generator with no clear position.
+                            break
                         end
 
-                        task.wait(math.max(0.1, tonumber(GetValue("AutoDoAllGeneratorInterval")) or 1.5))
+                        -- Give the server a moment to replicate 100% progress, then
+                        -- rescan the live map for the next unfinished generator.
+                        task.wait(0.35)
                     end
 
-                    if Token == AutoDoAllInvincibleToken then
-                        IsAutoDoAllGeneratorsRunning = false
-                        if GetValue("ResetAfterAllGenerators") then
-                            local Humanoid = LocalCharacter and LocalCharacter:FindFirstChildOfClass("Humanoid")
-                            if Humanoid and Humanoid.Health > 0 then
-                                Humanoid.Health = 0
-                            end
+                    -- Reset only after a fresh scan confirms every generator
+                    -- has reached 100%, and only if the reset option is enabled.
+                    if AllGeneratorsCompleted
+                        and not ShouldStop()
+                        and GetValue("ResetAfterAllGenerators")
+                        and not ResetAfterAllGeneratorsTriggered then
+                        ResetAfterAllGeneratorsTriggered = true
+                        local Character = LocalCharacter
+                        local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
+                        if Humanoid and Humanoid.Health > 0 then
+                            Humanoid.Health = 0
                         end
                     end
+
+                    RestoreAutoDoAllPuzzleAssist()
+                    IsAutoDoAllGeneratorsRunning = false
                 end)
             end
-        },
-        ["AutoDoAllGeneratorInterval"] = {
-            ["DisplayDescription"] = "Cooldown in seconds between Auto Do All Generator completions",
-            ["DisplayTitle"] = "Auto Do All Generator Interval",
-            ["LayoutOrder"] = 2.25,
-            ["Savable"] = true,
-            ["InstanceType"] = "NumberValue",
-            ["DefaultInstanceValue"] = 1.5,
-            ["Requirement"] = "AutoDoAllGenerators",
-            ["ExtraData"] = {
-                ["MaxValue"] = 8,
-                ["MinValue"] = 0.1,
-                ["Step"] = 0.1
-            }
         },
         ["GeneratorCooldown"] = {
             ["DisplayDescription"] = "The cooldown in seconds before completing a generator",
@@ -2096,108 +1985,108 @@ local FeatureLoadout; FeatureLoadout = {
             end
         },
         ["AutoBlockHitboxAllKiller"] = {
-            ["DisplayDescription"] = "Adjust the Auto Block hitbox size for every killer (studs)",
-            ["DisplayTitle"] = "All Killer ABH",
+            ["DisplayDescription"] = "Scales the base Auto Block hitbox size for every killer by a percentage; individual killer ABH sliders apply an additional percentage",
+            ["DisplayTitle"] = "All Killer ABH (%)",
             ["LayoutOrder"] = 17,
             ["Savable"] = true,
             ["InstanceType"] = "NumberValue",
             ["DefaultInstanceValue"] = 0,
             ["Requirement"] = "AutoBlock",
             ["ExtraData"] = {
-                ["MaxValue"] = 5,
-                ["MinValue"] = -3,
-                ["Step"] = 0.25
+                ["MaxValue"] = 100,
+                ["MinValue"] = -50,
+                ["Step"] = 5
             }
         },
         ["AutoBlockHitboxSlasher"] = {
-            ["DisplayDescription"] = "Slasher ABH size adjustment (studs)",
+            ["DisplayDescription"] = "Slasher ABH size adjustment (%)",
             ["DisplayTitle"] = "Slasher ABH",
             ["LayoutOrder"] = 18,
             ["Savable"] = true,
             ["InstanceType"] = "NumberValue",
             ["DefaultInstanceValue"] = 0,
             ["Requirement"] = "AutoBlock",
-            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
+            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
         },
         ["AutoBlockHitboxJohnDoe"] = {
-            ["DisplayDescription"] = "John Doe ABH size adjustment (studs)",
+            ["DisplayDescription"] = "John Doe ABH size adjustment (%)",
             ["DisplayTitle"] = "John Doe ABH",
             ["LayoutOrder"] = 19,
             ["Savable"] = true,
             ["InstanceType"] = "NumberValue",
             ["DefaultInstanceValue"] = 0,
             ["Requirement"] = "AutoBlock",
-            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
+            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
         },
         ["AutoBlockHitboxSixer"] = {
-            ["DisplayDescription"] = "Sixer ABH size adjustment (studs)",
+            ["DisplayDescription"] = "Sixer ABH size adjustment (%)",
             ["DisplayTitle"] = "Sixer ABH",
             ["LayoutOrder"] = 20,
             ["Savable"] = true,
             ["InstanceType"] = "NumberValue",
             ["DefaultInstanceValue"] = 0,
             ["Requirement"] = "AutoBlock",
-            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
+            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
         },
         ["AutoBlockHitboxNosferatu"] = {
-            ["DisplayDescription"] = "Nosferatu ABH size adjustment (studs)",
+            ["DisplayDescription"] = "Nosferatu ABH size adjustment (%)",
             ["DisplayTitle"] = "Nosferatu ABH",
             ["LayoutOrder"] = 21,
             ["Savable"] = true,
             ["InstanceType"] = "NumberValue",
             ["DefaultInstanceValue"] = 0,
             ["Requirement"] = "AutoBlock",
-            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
+            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
         },
         ["AutoBlockHitboxNoli"] = {
-            ["DisplayDescription"] = "Noli ABH size adjustment (studs)",
+            ["DisplayDescription"] = "Noli ABH size adjustment (%)",
             ["DisplayTitle"] = "Noli ABH",
             ["LayoutOrder"] = 22,
             ["Savable"] = true,
             ["InstanceType"] = "NumberValue",
             ["DefaultInstanceValue"] = 0,
             ["Requirement"] = "AutoBlock",
-            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
+            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
         },
         ["AutoBlockHitboxC00lkidd"] = {
-            ["DisplayDescription"] = "C00lkidd ABH size adjustment (studs)",
+            ["DisplayDescription"] = "C00lkidd ABH size adjustment (%)",
             ["DisplayTitle"] = "C00lkidd ABH",
             ["LayoutOrder"] = 23,
             ["Savable"] = true,
             ["InstanceType"] = "NumberValue",
             ["DefaultInstanceValue"] = 0,
             ["Requirement"] = "AutoBlock",
-            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
+            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
         },
         ["AutoBlockHitboxAzure"] = {
-            ["DisplayDescription"] = "Azure ABH size adjustment (studs)",
+            ["DisplayDescription"] = "Azure ABH size adjustment (%)",
             ["DisplayTitle"] = "Azure ABH",
             ["LayoutOrder"] = 24,
             ["Savable"] = true,
             ["InstanceType"] = "NumberValue",
             ["DefaultInstanceValue"] = 0,
             ["Requirement"] = "AutoBlock",
-            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
+            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
         },
         ["AutoBlockHitbox1x1x1x1"] = {
-            ["DisplayDescription"] = "1x1x1x1 ABH size adjustment (studs)",
+            ["DisplayDescription"] = "1x1x1x1 ABH size adjustment (%)",
             ["DisplayTitle"] = "1x1x1x1 ABH",
             ["LayoutOrder"] = 25,
             ["Savable"] = true,
             ["InstanceType"] = "NumberValue",
             ["DefaultInstanceValue"] = 0,
             ["Requirement"] = "AutoBlock",
-            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
+            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
         },
         ["AutoBlockHitboxGolemslash"] = {
-            ["DisplayDescription"] = "Golem Slash ABH size adjustment (studs)",
+            ["DisplayDescription"] = "Golem Slash ABH size adjustment (%)",
             ["DisplayTitle"] = "Golem Slash ABH",
             ["LayoutOrder"] = 26,
             ["Savable"] = true,
             ["InstanceType"] = "NumberValue",
             ["DefaultInstanceValue"] = 0,
             ["Requirement"] = "AutoBlock",
-            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
+            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
         },
         ["WallCheck"] = {
             ["DisplayDescription"] = "Prevents Auto Block and Drag Block from firing when a solid wall is between you and the killer",
@@ -2350,8 +2239,10 @@ local FeatureLoadout; FeatureLoadout = {
                         local BaseHitboxSize = (CustomHitbox and CustomHitbox["Size"] or Vector3.new(5.2, 6, 5.65)) * 2.2
                         local GlobalHitboxAdjustment = GetCurrentHitboxAdjustment("AutoBlockHitboxAllKiller")
                         local IndividualHitboxAdjustment = GetCurrentHitboxAdjustment("AutoBlockHitboxC00lkidd")
-                        local TotalHitboxAdjustment = GlobalHitboxAdjustment + IndividualHitboxAdjustment
-                        Part.Size = BaseHitboxSize + Vector3.new(TotalHitboxAdjustment, TotalHitboxAdjustment, TotalHitboxAdjustment)
+                        local ScaledBaseHitboxSize = BaseHitboxSize
+                            * math.max(0.1, 1 + GlobalHitboxAdjustment / 100)
+                            * math.max(0.1, 1 + IndividualHitboxAdjustment / 100)
+                        Part.Size = ScaledBaseHitboxSize
                         Part.Size = Vector3.new(math.max(0.1, Part.Size.X), math.max(0.1, Part.Size.Y), math.max(0.1, Part.Size.Z))
 
                         local DetectionOffset = CustomHitbox and CustomHitbox["Offset"] or CFrame.new(0,0,-3.5)
@@ -2485,8 +2376,10 @@ local FeatureLoadout; FeatureLoadout = {
                         local BaseHitboxSize = (CustomHitbox and CustomHitbox["Size"] or Vector3.new(5.2, 6, 5.65)) * 2.2
                         local GlobalHitboxAdjustment = GetCurrentHitboxAdjustment("AutoBlockHitboxAllKiller")
                         local IndividualHitboxAdjustment = GetCurrentHitboxAdjustment("AutoBlockHitboxJohnDoe")
-                        local TotalHitboxAdjustment = GlobalHitboxAdjustment + IndividualHitboxAdjustment
-                        Part.Size = BaseHitboxSize + Vector3.new(TotalHitboxAdjustment, TotalHitboxAdjustment, TotalHitboxAdjustment)
+                        local ScaledBaseHitboxSize = BaseHitboxSize
+                            * math.max(0.1, 1 + GlobalHitboxAdjustment / 100)
+                            * math.max(0.1, 1 + IndividualHitboxAdjustment / 100)
+                        Part.Size = ScaledBaseHitboxSize
                         Part.Size = Vector3.new(math.max(0.1, Part.Size.X), math.max(0.1, Part.Size.Y), math.max(0.1, Part.Size.Z))
 
                         local DetectionOffset = CustomHitbox and CustomHitbox["Offset"] or CFrame.new(0,0,-3.5)
@@ -2626,8 +2519,10 @@ local FeatureLoadout; FeatureLoadout = {
                                     end
 
                                     local IndividualPreviewAdjustment = GetCurrentHitboxAdjustment(PreviewKillerHitboxKey)
-                                    local TotalPreviewAdjustment = GlobalPreviewAdjustment + IndividualPreviewAdjustment
-                                    PreviewHitbox.Size = BasePreviewSize + Vector3.new(TotalPreviewAdjustment, TotalPreviewAdjustment, TotalPreviewAdjustment)
+                                    local ScaledBasePreviewSize = BasePreviewSize
+                                        * math.max(0.1, 1 + GlobalPreviewAdjustment / 100)
+                                        * math.max(0.1, 1 + IndividualPreviewAdjustment / 100)
+                                    PreviewHitbox.Size = ScaledBasePreviewSize
                                     PreviewHitbox.Size = Vector3.new(
                                         math.max(0.1, PreviewHitbox.Size.X),
                                         math.max(0.1, PreviewHitbox.Size.Y),
@@ -2691,8 +2586,10 @@ local FeatureLoadout; FeatureLoadout = {
                                         KillerHitboxKey = "AutoBlockHitboxGolemslash"
                                     end
                                     local IndividualHitboxAdjustment = GetCurrentHitboxAdjustment(KillerHitboxKey)
-                                    local TotalHitboxAdjustment = GlobalHitboxAdjustment + IndividualHitboxAdjustment
-                                    Part.Size = BaseHitboxSize + Vector3.new(TotalHitboxAdjustment, TotalHitboxAdjustment, TotalHitboxAdjustment)
+                                    local ScaledBaseHitboxSize = BaseHitboxSize
+                                        * math.max(0.1, 1 + GlobalHitboxAdjustment / 100)
+                                        * math.max(0.1, 1 + IndividualHitboxAdjustment / 100)
+                                    Part.Size = ScaledBaseHitboxSize
                                     Part.Size = Vector3.new(
                                         math.max(0.1, Part.Size.X),
                                         math.max(0.1, Part.Size.Y),
@@ -2992,6 +2889,34 @@ local FeatureLoadout; FeatureLoadout = {
             ["InstanceType"] = "NumberValue",
             ["DefaultInstanceValue"] = 0.2,
             ["Requirement"] = "AutoBlock|DragBlock",
+            ["ExtraData"] = {
+                ["MaxValue"] = 2,
+                ["MinValue"] = 0.01,
+                ["Step"] = 0.01
+            }
+        },
+        ["DragV2StopDistance"] = {
+            ["DisplayDescription"] = "How close Drag V2 stops the player near the killer (studs)",
+            ["DisplayTitle"] = "Drag V2 Stop Near Killer (Studs)",
+            ["LayoutOrder"] = 16.3,
+            ["Savable"] = true,
+            ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 3,
+            ["Requirement"] = "AutoBlock|DragV2",
+            ["ExtraData"] = {
+                ["MaxValue"] = 10,
+                ["MinValue"] = 0.5,
+                ["Step"] = 0.25
+            }
+        },
+        ["DragV2HoldDuration"] = {
+            ["DisplayDescription"] = "How long Drag V2 holds/moves the player toward the killer (seconds)",
+            ["DisplayTitle"] = "Drag V2 Hold Player Duration",
+            ["LayoutOrder"] = 16.4,
+            ["Savable"] = true,
+            ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 0.2,
+            ["Requirement"] = "AutoBlock|DragV2",
             ["ExtraData"] = {
                 ["MaxValue"] = 2,
                 ["MinValue"] = 0.01,
