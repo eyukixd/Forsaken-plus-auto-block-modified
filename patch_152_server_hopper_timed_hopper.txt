@@ -1985,107 +1985,180 @@ local FeatureLoadout; FeatureLoadout = {
             end
         },
         ["AutoBlockHitboxAllKiller"] = {
-            ["DisplayDescription"] = "Scales the base Auto Block hitbox size for every killer by a percentage; individual killer ABH sliders apply an additional percentage",
-            ["DisplayTitle"] = "All Killer ABH (%)",
+            ["DisplayDescription"] = "Adjust the Auto Block hitbox size for every killer (studs)",
+            ["DisplayTitle"] = "All Killer ABH",
             ["LayoutOrder"] = 17,
             ["Savable"] = true,
             ["InstanceType"] = "NumberValue",
             ["DefaultInstanceValue"] = 0,
             ["Requirement"] = "AutoBlock",
             ["ExtraData"] = {
-                ["MaxValue"] = 100,
-                ["MinValue"] = -50,
-                ["Step"] = 5
+                ["MaxValue"] = 5,
+                ["MinValue"] = -3,
+                ["Step"] = 0.25
             }
         },
         ["AutoBlockHitboxSlasher"] = {
-            ["DisplayDescription"] = "Slasher ABH size adjustment (%)",
+            ["DisplayDescription"] = "Slasher ABH size adjustment (studs)",
             ["DisplayTitle"] = "Slasher ABH",
             ["LayoutOrder"] = 18,
             ["Savable"] = true,
             ["InstanceType"] = "NumberValue",
             ["DefaultInstanceValue"] = 0,
             ["Requirement"] = "AutoBlock",
-            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
+            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
         },
         ["AutoBlockHitboxJohnDoe"] = {
-            ["DisplayDescription"] = "John Doe ABH size adjustment (%)",
+            ["DisplayDescription"] = "John Doe ABH size adjustment (studs)",
             ["DisplayTitle"] = "John Doe ABH",
             ["LayoutOrder"] = 19,
             ["Savable"] = true,
             ["InstanceType"] = "NumberValue",
             ["DefaultInstanceValue"] = 0,
             ["Requirement"] = "AutoBlock",
-            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
+            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
         },
         ["AutoBlockHitboxSixer"] = {
-            ["DisplayDescription"] = "Sixer ABH size adjustment (%)",
+            ["DisplayDescription"] = "Sixer ABH size adjustment (studs)",
             ["DisplayTitle"] = "Sixer ABH",
             ["LayoutOrder"] = 20,
             ["Savable"] = true,
             ["InstanceType"] = "NumberValue",
             ["DefaultInstanceValue"] = 0,
             ["Requirement"] = "AutoBlock",
-            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
+            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
         },
         ["AutoBlockHitboxNosferatu"] = {
-            ["DisplayDescription"] = "Nosferatu ABH size adjustment (%)",
+            ["DisplayDescription"] = "Nosferatu ABH size adjustment (studs)",
             ["DisplayTitle"] = "Nosferatu ABH",
             ["LayoutOrder"] = 21,
             ["Savable"] = true,
             ["InstanceType"] = "NumberValue",
             ["DefaultInstanceValue"] = 0,
             ["Requirement"] = "AutoBlock",
-            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
+            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
         },
         ["AutoBlockHitboxNoli"] = {
-            ["DisplayDescription"] = "Noli ABH size adjustment (%)",
+            ["DisplayDescription"] = "Noli ABH size adjustment (studs)",
             ["DisplayTitle"] = "Noli ABH",
             ["LayoutOrder"] = 22,
             ["Savable"] = true,
             ["InstanceType"] = "NumberValue",
             ["DefaultInstanceValue"] = 0,
             ["Requirement"] = "AutoBlock",
-            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
+            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
         },
         ["AutoBlockHitboxC00lkidd"] = {
-            ["DisplayDescription"] = "C00lkidd ABH size adjustment (%)",
+            ["DisplayDescription"] = "C00lkidd ABH size adjustment (studs)",
             ["DisplayTitle"] = "C00lkidd ABH",
             ["LayoutOrder"] = 23,
             ["Savable"] = true,
             ["InstanceType"] = "NumberValue",
             ["DefaultInstanceValue"] = 0,
             ["Requirement"] = "AutoBlock",
-            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
+            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
         },
         ["AutoBlockHitboxAzure"] = {
-            ["DisplayDescription"] = "Azure ABH size adjustment (%)",
+            ["DisplayDescription"] = "Azure ABH size adjustment (studs)",
             ["DisplayTitle"] = "Azure ABH",
             ["LayoutOrder"] = 24,
             ["Savable"] = true,
             ["InstanceType"] = "NumberValue",
             ["DefaultInstanceValue"] = 0,
             ["Requirement"] = "AutoBlock",
-            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
+            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
         },
         ["AutoBlockHitbox1x1x1x1"] = {
-            ["DisplayDescription"] = "1x1x1x1 ABH size adjustment (%)",
+            ["DisplayDescription"] = "1x1x1x1 ABH size adjustment (studs)",
             ["DisplayTitle"] = "1x1x1x1 ABH",
             ["LayoutOrder"] = 25,
             ["Savable"] = true,
             ["InstanceType"] = "NumberValue",
             ["DefaultInstanceValue"] = 0,
             ["Requirement"] = "AutoBlock",
-            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
+            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
         },
         ["AutoBlockHitboxGolemslash"] = {
-            ["DisplayDescription"] = "Golem Slash ABH size adjustment (%)",
+            ["DisplayDescription"] = "Golem Slash ABH size adjustment (studs)",
             ["DisplayTitle"] = "Golem Slash ABH",
             ["LayoutOrder"] = 26,
             ["Savable"] = true,
             ["InstanceType"] = "NumberValue",
             ["DefaultInstanceValue"] = 0,
             ["Requirement"] = "AutoBlock",
+            ["ExtraData"] = { ["MaxValue"] = 5, ["MinValue"] = -3, ["Step"] = 0.25 }
+        },
+        ["DragV2HitboxAllKillerPercent"] = {
+            ["DisplayDescription"] = "Scales only Drag V2's seventh-check hitbox for every killer (%)",
+            ["DisplayTitle"] = "Drag V2 All Killer ABH (%)",
+            ["LayoutOrder"] = 26.1,
+            ["Savable"] = true,
+            ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 0,
+            ["Requirement"] = "AutoBlock|DragV2",
+            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
+        },
+        ["DragV2HitboxSlasherPercent"] = {
+            ["DisplayDescription"] = "Drag V2 seventh-check hitbox adjustment for Slasher (%)",
+            ["DisplayTitle"] = "Drag V2 Slasher ABH (%)",
+            ["LayoutOrder"] = 26.2, ["Savable"] = true, ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 75, ["Requirement"] = "AutoBlock|DragV2",
+            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
+        },
+        ["DragV2HitboxJohnDoePercent"] = {
+            ["DisplayDescription"] = "Drag V2 seventh-check hitbox adjustment for John Doe (%)",
+            ["DisplayTitle"] = "Drag V2 John Doe ABH (%)",
+            ["LayoutOrder"] = 26.3, ["Savable"] = true, ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 50, ["Requirement"] = "AutoBlock|DragV2",
+            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
+        },
+        ["DragV2HitboxSixerPercent"] = {
+            ["DisplayDescription"] = "Drag V2 seventh-check hitbox adjustment for Sixer (%)",
+            ["DisplayTitle"] = "Drag V2 Sixer ABH (%)",
+            ["LayoutOrder"] = 26.4, ["Savable"] = true, ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 75, ["Requirement"] = "AutoBlock|DragV2",
+            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
+        },
+        ["DragV2HitboxNosferatuPercent"] = {
+            ["DisplayDescription"] = "Drag V2 seventh-check hitbox adjustment for Nosferatu (%)",
+            ["DisplayTitle"] = "Drag V2 Nosferatu ABH (%)",
+            ["LayoutOrder"] = 26.5, ["Savable"] = true, ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 50, ["Requirement"] = "AutoBlock|DragV2",
+            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
+        },
+        ["DragV2HitboxNoliPercent"] = {
+            ["DisplayDescription"] = "Drag V2 seventh-check hitbox adjustment for Noli (%)",
+            ["DisplayTitle"] = "Drag V2 Noli ABH (%)",
+            ["LayoutOrder"] = 26.6, ["Savable"] = true, ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 50, ["Requirement"] = "AutoBlock|DragV2",
+            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
+        },
+        ["DragV2HitboxC00lkiddPercent"] = {
+            ["DisplayDescription"] = "Drag V2 seventh-check hitbox adjustment for C00lkidd (%)",
+            ["DisplayTitle"] = "Drag V2 C00lkidd ABH (%)",
+            ["LayoutOrder"] = 26.7, ["Savable"] = true, ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 50, ["Requirement"] = "AutoBlock|DragV2",
+            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
+        },
+        ["DragV2HitboxAzurePercent"] = {
+            ["DisplayDescription"] = "Drag V2 seventh-check hitbox adjustment for Azure (%)",
+            ["DisplayTitle"] = "Drag V2 Azure ABH (%)",
+            ["LayoutOrder"] = 26.8, ["Savable"] = true, ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 50, ["Requirement"] = "AutoBlock|DragV2",
+            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
+        },
+        ["DragV2Hitbox1x1x1x1Percent"] = {
+            ["DisplayDescription"] = "Drag V2 seventh-check hitbox adjustment for 1x1x1x1 (%)",
+            ["DisplayTitle"] = "Drag V2 1x1x1x1 ABH (%)",
+            ["LayoutOrder"] = 26.9, ["Savable"] = true, ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 50, ["Requirement"] = "AutoBlock|DragV2",
+            ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
+        },
+        ["DragV2HitboxGolemslashPercent"] = {
+            ["DisplayDescription"] = "Drag V2 seventh-check hitbox adjustment for Golem Slash (%)",
+            ["DisplayTitle"] = "Drag V2 Golem Slash ABH (%)",
+            ["LayoutOrder"] = 27, ["Savable"] = true, ["InstanceType"] = "NumberValue",
+            ["DefaultInstanceValue"] = 50, ["Requirement"] = "AutoBlock|DragV2",
             ["ExtraData"] = { ["MaxValue"] = 100, ["MinValue"] = -50, ["Step"] = 5 }
         },
         ["WallCheck"] = {
@@ -2239,10 +2312,8 @@ local FeatureLoadout; FeatureLoadout = {
                         local BaseHitboxSize = (CustomHitbox and CustomHitbox["Size"] or Vector3.new(5.2, 6, 5.65)) * 2.2
                         local GlobalHitboxAdjustment = GetCurrentHitboxAdjustment("AutoBlockHitboxAllKiller")
                         local IndividualHitboxAdjustment = GetCurrentHitboxAdjustment("AutoBlockHitboxC00lkidd")
-                        local ScaledBaseHitboxSize = BaseHitboxSize
-                            * math.max(0.1, 1 + GlobalHitboxAdjustment / 100)
-                            * math.max(0.1, 1 + IndividualHitboxAdjustment / 100)
-                        Part.Size = ScaledBaseHitboxSize
+                        local TotalHitboxAdjustment = GlobalHitboxAdjustment + IndividualHitboxAdjustment
+                        Part.Size = BaseHitboxSize + Vector3.new(TotalHitboxAdjustment, TotalHitboxAdjustment, TotalHitboxAdjustment)
                         Part.Size = Vector3.new(math.max(0.1, Part.Size.X), math.max(0.1, Part.Size.Y), math.max(0.1, Part.Size.Z))
 
                         local DetectionOffset = CustomHitbox and CustomHitbox["Offset"] or CFrame.new(0,0,-3.5)
@@ -2376,10 +2447,8 @@ local FeatureLoadout; FeatureLoadout = {
                         local BaseHitboxSize = (CustomHitbox and CustomHitbox["Size"] or Vector3.new(5.2, 6, 5.65)) * 2.2
                         local GlobalHitboxAdjustment = GetCurrentHitboxAdjustment("AutoBlockHitboxAllKiller")
                         local IndividualHitboxAdjustment = GetCurrentHitboxAdjustment("AutoBlockHitboxJohnDoe")
-                        local ScaledBaseHitboxSize = BaseHitboxSize
-                            * math.max(0.1, 1 + GlobalHitboxAdjustment / 100)
-                            * math.max(0.1, 1 + IndividualHitboxAdjustment / 100)
-                        Part.Size = ScaledBaseHitboxSize
+                        local TotalHitboxAdjustment = GlobalHitboxAdjustment + IndividualHitboxAdjustment
+                        Part.Size = BaseHitboxSize + Vector3.new(TotalHitboxAdjustment, TotalHitboxAdjustment, TotalHitboxAdjustment)
                         Part.Size = Vector3.new(math.max(0.1, Part.Size.X), math.max(0.1, Part.Size.Y), math.max(0.1, Part.Size.Z))
 
                         local DetectionOffset = CustomHitbox and CustomHitbox["Offset"] or CFrame.new(0,0,-3.5)
@@ -2519,10 +2588,8 @@ local FeatureLoadout; FeatureLoadout = {
                                     end
 
                                     local IndividualPreviewAdjustment = GetCurrentHitboxAdjustment(PreviewKillerHitboxKey)
-                                    local ScaledBasePreviewSize = BasePreviewSize
-                                        * math.max(0.1, 1 + GlobalPreviewAdjustment / 100)
-                                        * math.max(0.1, 1 + IndividualPreviewAdjustment / 100)
-                                    PreviewHitbox.Size = ScaledBasePreviewSize
+                                    local TotalPreviewAdjustment = GlobalPreviewAdjustment + IndividualPreviewAdjustment
+                                    PreviewHitbox.Size = BasePreviewSize + Vector3.new(TotalPreviewAdjustment, TotalPreviewAdjustment, TotalPreviewAdjustment)
                                     PreviewHitbox.Size = Vector3.new(
                                         math.max(0.1, PreviewHitbox.Size.X),
                                         math.max(0.1, PreviewHitbox.Size.Y),
@@ -2586,10 +2653,8 @@ local FeatureLoadout; FeatureLoadout = {
                                         KillerHitboxKey = "AutoBlockHitboxGolemslash"
                                     end
                                     local IndividualHitboxAdjustment = GetCurrentHitboxAdjustment(KillerHitboxKey)
-                                    local ScaledBaseHitboxSize = BaseHitboxSize
-                                        * math.max(0.1, 1 + GlobalHitboxAdjustment / 100)
-                                        * math.max(0.1, 1 + IndividualHitboxAdjustment / 100)
-                                    Part.Size = ScaledBaseHitboxSize
+                                    local TotalHitboxAdjustment = GlobalHitboxAdjustment + IndividualHitboxAdjustment
+                                    Part.Size = BaseHitboxSize + Vector3.new(TotalHitboxAdjustment, TotalHitboxAdjustment, TotalHitboxAdjustment)
                                     Part.Size = Vector3.new(
                                         math.max(0.1, Part.Size.X),
                                         math.max(0.1, Part.Size.Y),
@@ -2614,16 +2679,28 @@ local FeatureLoadout; FeatureLoadout = {
                                         Part.CFrame = Part.CFrame * CFrame.new(0, 0, 1)
                                     end
                                     if i == 7 and GetValue("DragV2", false) then
-                                        -- Patch 305: Drag V2 uses a 75% larger hitbox than normal ABH for Slasher/Sixer.
+                                        -- Drag V2-only percentage scaling; normal ABH remains adjusted in studs above.
                                         local DragV2KillerName = string.lower(Killer.Name):gsub("[%s_%-]", "")
-                                        if DragV2KillerName == "slasher" or DragV2KillerName == "sixer" then
-                                            Part.Size = Part.Size * 1.75
-                                            if DragV2KillerName == "slasher" then
-                                                -- Patch 308: Slasher's forward depth matches its side width for Drag V2.
-                                                Part.Size = Vector3.new(Part.Size.X, Part.Size.Y, Part.Size.X)
-                                            end
-                                        else
-                                            Part.Size = Part.Size * 1.5
+                                        local DragV2KillerPercentKeys = {
+                                            ["slasher"] = "DragV2HitboxSlasherPercent",
+                                            ["johndoe"] = "DragV2HitboxJohnDoePercent",
+                                            ["sixer"] = "DragV2HitboxSixerPercent",
+                                            ["nosferatu"] = "DragV2HitboxNosferatuPercent",
+                                            ["noli"] = "DragV2HitboxNoliPercent",
+                                            ["c00lkidd"] = "DragV2HitboxC00lkiddPercent",
+                                            ["azure"] = "DragV2HitboxAzurePercent",
+                                            ["1x1x1x1"] = "DragV2Hitbox1x1x1x1Percent",
+                                            ["golemslash"] = "DragV2HitboxGolemslashPercent"
+                                        }
+                                        local DragV2KillerPercentKey = DragV2KillerPercentKeys[DragV2KillerName]
+                                        local DragV2GlobalPercent = GetCurrentHitboxAdjustment("DragV2HitboxAllKillerPercent")
+                                        local DragV2IndividualPercent = DragV2KillerPercentKey and GetCurrentHitboxAdjustment(DragV2KillerPercentKey) or 50
+                                        local DragV2Scale = math.max(0.1, 1 + DragV2GlobalPercent / 100)
+                                            * math.max(0.1, 1 + DragV2IndividualPercent / 100)
+                                        Part.Size = Part.Size * DragV2Scale
+                                        if DragV2KillerName == "slasher" then
+                                            -- Preserve Slasher's Drag V2 forward-depth shape.
+                                            Part.Size = Vector3.new(Part.Size.X, Part.Size.Y, Part.Size.X)
                                         end
                                     end
                                     Part.CanCollide = false
